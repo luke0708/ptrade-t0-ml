@@ -84,6 +84,12 @@ pip install -r requirements.txt
 
 > 前提：已安装 Python 3.11+、Git，OneDrive 已登录并完成初次同步
 
+如果这台 Mac 需要训练 `xgboost` baseline，请先安装 OpenMP 运行库：
+
+```bash
+brew install libomp
+```
+
 **Step 1**：克隆代码仓库
 
 ```bash
@@ -103,6 +109,12 @@ python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_t
 ```
 
 这台 Mac 当前已验证的解释器是 `python3.12`。`setup_venv_mac.sh` 会自动选择 `python3.12` 或 `python3.11` 创建 `.venv`。如果仓库里已有完整的 `vendor/` 依赖，它会自动接入虚拟环境；否则请在激活 `.venv` 后执行：
+
+如果这里在 `xgboost` 导入时报 `libomp.dylib` 缺失，说明 Python 包已经装了，但系统缺少 OpenMP 运行库。先执行：
+
+```bash
+brew install libomp
+```
 
 ```bash
 pip install -r requirements-dev.txt
@@ -126,6 +138,12 @@ python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pand
 ```
 
 > 默认情况下，`setup_vendor_env_mac.sh` 会安装 `requirements-dev.txt`，也就是完整算法开发依赖。`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
+
+如果 `xgboost` 报 `libomp.dylib` 缺失，也要先执行：
+
+```bash
+brew install libomp
+```
 
 **Step 3**：等待 OneDrive 把 Windows 上传的数据同步完成，然后运行软链接脚本
 

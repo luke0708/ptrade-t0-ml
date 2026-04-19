@@ -1,2 +1,137 @@
-Project Plan: PTrade T+0 ML Filter (XGBoost)1. Project OverviewGoal: Build an offline Machine Learning (XGBoost) pipeline to predict the probability of 300661 (ShengBang) exhibiting "High-Volatility/Suitable-for-T+0" characteristics on the next trading day.Architecture: \* Offline Training: Local Python environment (pandas, pandas-ta, scikit-learn, xgboost).Online Integration: Export the daily prediction probability (0\~1) as a .csv or .json file. The existing PTrade V3.2 script will read this file in before\_trading\_start to dynamically toggle trend\_weak.Target Stock: 300661.SZData Granularity: Daily Bars (前复权).2. Phase 1: Data Acquisition \& PreparationTask Objective: Fetch clean, historical daily K-line data for 300661.Step 1: Write a Python script (fetch\_data.py) using akshare (or tushare if API key provided) to download daily data for '300661' from 2020-01-01 to today.Step 2: Ensure columns are renamed to standard english (e.g., date, open, high, low, close, volume, amount).Step 3: Save the raw data locally as data/300661\_raw\_daily.csv.Validation: Output the first 5 and last 5 rows to console to verify data integrity (no NaNs in core price fields).3. Phase 2: Feature Engineering (The Core)Task Objective: Transform raw OHLCV data into predictive technical features.Step 1: Create feature\_engineering.py. Load the raw CSV.Step 2: Use the pandas-ta library to generate the following technical indicators (ensure no look-ahead bias):Momentum: RSI (14), MACD (12,26,9) - keep MACD histogram.Volatility: ATR (14), Bollinger Bands Width (20, 2).Trend: SMA (20), SMA (60), Distance from Close to SMA (20).Volume: Volume SMA (5), Volume SMA (20), Turnover Rate (if available, otherwise use amount).Step 3: Generate custom target-specific features:daily\_amplitude = (high - low) / pre\_closegap\_pct = (open - pre\_close) / pre\_closeStep 4: Drop all rows with NaN values caused by rolling windows. Save as data/300661\_features.csv.4. Phase 3: Label Generation (Defining "Good T+0 Days")Task Objective: Create the binary target variable y for XGBoost to predict.Step 1: Create generate\_labels.py. Load the features CSV.Step 2: Define the condition for a "Good T+0 Day" (Label 1). A day is 1 if BOTH conditions are met:daily\_amplitude > 0.035 (Amplitude greater than 3.5%).close > pre\_close \* 0.98 (Avoid days that are pure one-way limit-down crashes).Step 3: Assign Label 0 to all other days.Step 4: CRITICAL SHIFT: Shift the label column backwards by 1 day (df\['target'] = df\['label'].shift(-1)). The features of Day $T$ must align with the target of Day $T+1$.Step 5: Drop the last row (which will have a NaN target). Save as data/300661\_labeled\_dataset.csv.5. Phase 4: XGBoost Model Training \& EvaluationTask Objective: Train the classifier and evaluate its predictive power.Step 1: Create train\_model.py. Load the labeled dataset.Step 2: Split data into Train (first 80% chronologically) and Test (last 20%). DO NOT use random split (time-series leakage).Step 3: Initialize xgboost.XGBClassifier with base hyperparameters (e.g., max\_depth=4, learning\_rate=0.05, n\_estimators=200, scale\_pos\_weight to handle class imbalance if Label 1 is rare).Step 4: Train the model.Step 5: Evaluate on the Test set. Output the following metrics to console:Accuracy, Precision, Recall, F1-Score.Confusion Matrix.Step 6: Plot Feature Importance (top 10 features) using matplotlib and save the image. Save the trained model to models/xgb\_t0\_model.json.6. Phase 5: Daily Prediction Script (PTrade Bridge)Task Objective: Create the lightweight script that runs daily to feed PTrade.Step 1: Create daily\_predict.py.Step 2: This script should pull only the latest required K-lines (e.g., last 60 days to calculate MA60/ATR14), apply the exact same feature engineering from Phase 2 to get the features for today.Step 3: Load the saved xgb\_t0\_model.json.Step 4: Predict the probability of target=1 for tomorrow.Step 5: Save the result (Date, Probability) to data/daily\_signal.csv or a lightweight signal.json.Notes for the AI Agent executing this plan:Do not hallucinate APIs. Use standard akshare and pandas-ta syntax.If you encounter an error during implementation, stop and ask the user for clarification before writing a workaround.Execute this plan sequentially. Begin with Phase 1. Request confirmation before moving to the next Phase.
+# Project Plan
 
+## 项目定位
+
+这是一个面向 `300661` 的专属 T+0 机器学习辅助项目，不是通用 A 股择时框架。
+
+目标不是让 PTrade 在盘中跑复杂模型，而是构建一条稳定、可复盘、可落地的两层链路：
+
+1. 本地离线机器学习
+   - 每个交易日收盘后，在本地 Python 环境中使用分钟、日线和环境特征训练/打分
+   - 导出第二个交易日要使用的 `ml_daily_signal.json`
+2. PTrade 盘中规则执行
+   - `before_trading_start` 读取离线信号
+   - 盘中只结合 Level2 做轻量硬规则过滤、降级和参数调整
+   - 不在 PTrade 沙盒里做 XGBoost/LightGBM 推理
+
+## 当前真实状态
+
+- 已完成 `Phase 1/2/3`
+  - `300661` 长历史 `1m` 底座
+  - 生产标签引擎
+  - 生产特征引擎
+- 已完成 baseline 多头训练与实验版日信号导出
+- 已新增 baseline 质量复盘工具
+- 当前关键问题不是“怎么把盘中模型塞进 PTrade”，而是：
+  - baseline 质量还不够强
+  - `SAFE/NORMAL` 的策略级分离度仍弱
+  - `downside_regression` 当前表现异常，需要先排查目标定义、样本污染和特征传导问题
+
+## 当前主线文件
+
+### 核心训练链路
+
+- `build_minute_foundation.py`
+- `build_label_engine.py`
+- `build_feature_engine.py`
+- `train_baseline_models.py`
+- `export_ml_daily_signal.py`
+- `analyze_baseline_quality.py`
+
+### 核心包模块
+
+- `ptrade_t0_ml/minute_foundation.py`
+- `ptrade_t0_ml/label_engine.py`
+- `ptrade_t0_ml/feature_engine.py`
+- `ptrade_t0_ml/baseline_models.py`
+- `ptrade_t0_ml/signal_export.py`
+- `ptrade_t0_ml/baseline_quality.py`
+
+## 最近确认的架构口径
+
+### 1. PTrade 不跑盘中机器学习推理
+
+PTrade 是封闭 Python 沙盒，盘中运行预算很紧，不能假设可以稳定加载复杂模型并高频推理。
+
+所以当前架构固定为：
+
+- 离线机器学习负责“明天大方向”
+- PTrade 负责“今天盘中怎么按规则执行”
+
+### 2. Level2 的正确接入方式
+
+Level2 在当前项目中有两种正确入口：
+
+1. 盘中硬规则
+   - 用于即时降级或限流
+   - 例如关闭抄底、放宽网格、限制开仓
+2. 收盘后摘要特征
+   - 盘中不做复杂学习
+   - 收盘后把 Level2 行为压缩成可训练的摘要特征，供次日离线模型使用
+
+### 3. 当前生产优先级
+
+- `pred_positive_grid_day_t1`
+- `pred_tradable_score_t1`
+- `pred_vwap_reversion_score_t1`
+- `pred_trend_break_risk_t1` 仅作软约束
+- `pred_grid_pnl_t1` 保留为研究头
+- `pred_downside_t1` 先做质量诊断，再决定是否继续沿用当前目标定义
+
+## 当前阶段目标
+
+### 阶段 A：先把 baseline 看懂
+
+当前优先目标：
+
+1. 解释为什么 `SAFE/NORMAL` 没拉开足够大的策略级差异
+2. 解释为什么 `downside_regression` 当前弱甚至失真
+3. 识别是否存在目标泄露、复权污染、异常事件样本污染
+4. 确认下一轮应该优先修：
+   - 目标定义
+   - 特征工程
+   - overnight 因子
+   - 还是 Level2 收盘摘要特征
+
+### 阶段 B：再决定模型修复路线
+
+只有在阶段 A 完成后，才决定下一步做哪一条：
+
+- 修复 Target Leakage
+- 修复 Downside 风险建模
+- 接入 overnight 因子
+- 设计 Level2 收盘摘要特征
+
+## 当前可直接使用的分析产物
+
+运行：
+
+```bash
+source .venv/bin/activate
+python analyze_baseline_quality.py
+```
+
+会生成：
+
+- `analysis/baseline_test_predictions.csv`
+- `analysis/head_bucket_summary.csv`
+- `analysis/safe_mode_replay_summary.csv`
+- `analysis/downside_error_cases.csv`
+- `analysis/head_feature_importance.csv`
+
+这些文件是当前 baseline 质量复盘的第一入口。
+
+## 当前明确不做的事情
+
+- 不在 PTrade 盘中跑 XGBoost 实时推理
+- 不在 PTrade 盘中动态构造大批量分钟特征再评分
+- 不把旧版日线单模型流程继续当作主线维护
+- 不在 baseline 质量还没看明白前就继续堆复杂模型
+
+## 下一步计划
+
+1. 完成仓库清理，移除旧版日线单模型链路与散落的临时测试/抓取脚本
+2. 基于 `analysis/` 下的复盘结果，优先排查：
+   - Target Leakage
+   - `downside_regression` 异常
+3. 根据排查结论再更新 `docs/ml_implementation_plan.md` 的执行顺序

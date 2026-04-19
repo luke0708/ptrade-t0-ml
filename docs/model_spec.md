@@ -6,6 +6,15 @@ This document defines the final ML system architecture for `300661`, using long-
 
 The system is not a single on/off classifier. It is a multi-head decision engine serving daily trading-mode control, risk control, and parameter adaptation.
 
+Important runtime constraint:
+
+- model training and scoring happen offline on the local machine
+- PTrade is treated as a closed execution sandbox
+- intraday PTrade code must not rely on real-time XGBoost / LightGBM inference
+- Level2 belongs either in:
+  - intraday hard-rule execution controls
+  - post-close summary features for the next offline training cycle
+
 ## Modeling Unit
 
 - one sample per trading day `t`
@@ -58,6 +67,13 @@ Reasons:
 - tree models are easier to validate and interpret
 - easier to integrate into the current PTrade workflow
 
+This does **not** mean the tree model is loaded and rescored on every intraday event inside PTrade.
+The production contract is:
+
+1. score offline after the close
+2. export a compact daily signal
+3. let PTrade consume that signal and apply lightweight intraday rules
+
 ## Feature Inputs
 
 Allowed features come only from:
@@ -101,6 +117,27 @@ The final acceptance criterion is strategy improvement, not just ML score qualit
 - higher next-day replay PnL in top-score groups
 - lower drawdown on high-risk flagged days
 - lower wasted activation rate
+- meaningful separation between `SAFE` and `NORMAL`
+- no obvious contamination from ex-rights / abnormal event days in critical targets
+
+## Intraday Level2 Role
+
+Level2 is explicitly separated from the daily model:
+
+- allowed intraday role:
+  - cancel or delay entries
+  - widen grid
+  - reduce position size
+  - disable dip-buy / aggressive execution
+- disallowed intraday role:
+  - rebuild large feature sets
+  - run a second complex ML scoring stack inside PTrade
+
+Recommended future integration:
+
+1. use Level2 hard rules intraday
+2. summarize those observations after the close
+3. merge the summary into the next offline feature table
 
 ## Current Production Preference
 

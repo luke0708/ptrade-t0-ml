@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import platform
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -116,7 +117,9 @@ def build_xgb_regressor(config: ProjectConfig):
     try:
         from xgboost import XGBRegressor
     except ImportError as exc:
-        raise ImportError("xgboost is required. Install dependencies with `pip install -r requirements.txt`.") from exc
+        raise ImportError("xgboost is required. Install dependencies with `pip install -r requirements-dev.txt`.") from exc
+    except Exception as exc:
+        raise RuntimeError(_format_xgboost_runtime_error(exc)) from exc
 
     return XGBRegressor(
         max_depth=config.model_params.max_depth,
@@ -135,7 +138,9 @@ def build_xgb_classifier(config: ProjectConfig, scale_pos_weight: float):
     try:
         from xgboost import XGBClassifier
     except ImportError as exc:
-        raise ImportError("xgboost is required. Install dependencies with `pip install -r requirements.txt`.") from exc
+        raise ImportError("xgboost is required. Install dependencies with `pip install -r requirements-dev.txt`.") from exc
+    except Exception as exc:
+        raise RuntimeError(_format_xgboost_runtime_error(exc)) from exc
 
     return XGBClassifier(
         max_depth=config.model_params.max_depth,
@@ -150,6 +155,17 @@ def build_xgb_classifier(config: ProjectConfig, scale_pos_weight: float):
         scale_pos_weight=scale_pos_weight,
         max_delta_step=1,
     )
+
+
+def _format_xgboost_runtime_error(exc: Exception) -> str:
+    error_message = str(exc)
+    if platform.system() == "Darwin" and "libomp" in error_message:
+        return (
+            "xgboost is installed but its OpenMP runtime is missing on macOS. "
+            "Run `brew install libomp`, restart the shell, reactivate `.venv`, and retry "
+            "`python train_baseline_models.py`."
+        )
+    return f"Failed to load xgboost runtime: {error_message}"
 
 
 def _evaluate_regression(y_true: pd.Series, predictions: np.ndarray) -> dict[str, float]:

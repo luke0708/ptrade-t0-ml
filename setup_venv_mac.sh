@@ -6,6 +6,18 @@ VENV_DIR="$PROJECT_DIR/.venv"
 VENDOR_DIR="$PROJECT_DIR/vendor"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-$PROJECT_DIR/requirements-dev.txt}"
 
+check_libomp_runtime() {
+    if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ] || [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
+        echo "✅ 已检测到 libomp，xgboost 可使用 OpenMP 运行库"
+    elif command -v brew >/dev/null 2>&1; then
+        echo "⚠️ 未检测到 libomp。macOS 上运行 xgboost 训练前请先执行:"
+        echo "brew install libomp"
+    else
+        echo "⚠️ 未检测到 libomp，且当前没有找到 brew。"
+        echo "请先安装 Homebrew，然后执行: brew install libomp"
+    fi
+}
+
 if [ -n "${PYTHON_BIN:-}" ]; then
     SELECTED_PYTHON="$PYTHON_BIN"
 elif command -v python3.12 >/dev/null 2>&1; then
@@ -21,6 +33,7 @@ fi
 echo "=== ptrade-t0-ml 虚拟环境初始化 (Mac) ==="
 echo "使用解释器: $SELECTED_PYTHON"
 echo "开发依赖清单: $REQUIREMENTS_FILE"
+check_libomp_runtime
 
 "$SELECTED_PYTHON" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip --version >/dev/null
@@ -47,6 +60,9 @@ if "$VENV_DIR/bin/python" -c "import sklearn, matplotlib, xgboost, pandas_ta" >/
 else
     echo "⚠️ 当前还不是完整算法开发环境，请执行:"
     echo ".venv/bin/pip install -r requirements-dev.txt"
+    if [ ! -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ] && [ ! -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
+        echo "⚠️ 如果失败点出现在 xgboost / libomp，请先执行: brew install libomp"
+    fi
 fi
 
 echo ""

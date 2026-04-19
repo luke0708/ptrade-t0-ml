@@ -256,9 +256,12 @@ Completed first-slice outputs:
 
 - [train_baseline_models.py](</E:/AI炒股/机器学习/train_baseline_models.py>)
 - [baseline_models.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_models.py>)
+- [analyze_baseline_quality.py](</E:/AI炒股/机器学习/analyze_baseline_quality.py>)
+- [baseline_quality.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_quality.py>)
 - [300661_SZ_training_dataset.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_training_dataset.csv>)
 - [baseline_stock_only_metadata.json](</E:/AI炒股/机器学习/models/baseline_stock_only/baseline_stock_only_metadata.json>)
 - baseline model files under [baseline_stock_only](</E:/AI炒股/机器学习/models/baseline_stock_only>)
+- baseline quality analysis outputs under [analysis](</E:/AI炒股/机器学习/analysis>)
 
 Completed first-slice heads:
 
@@ -272,14 +275,20 @@ Completed first-slice heads:
 
 Validated facts from the baseline metadata:
 
-- training rows: `2150`
-- train/test split: `1720 / 430`
-- classifier calibration split inside train: `1462 / 258`
-- test range: `2024-07-03` to `2026-04-13`
+- training rows: `2153`
+- train/test split: `1722 / 431`
+- classifier calibration split inside train: `1463 / 259`
+- test range: `2024-07-05` to `2026-04-16`
 - model feature column count: `203`
 - the baseline stack was retrained after removing `next_day_*` leakage columns from model inputs
 - the latest run now includes `399006 / 512480` daily environment features
 - the latest run also calibrates classifier thresholds on a time-ordered validation slice before final retraining
+- a first dedicated quality-analysis pass can now export:
+  - per-day test predictions
+  - per-head score-bucket summaries
+  - `SAFE/NORMAL` replay summaries
+  - downside error cases
+  - per-head feature importance
 
 Current baseline quality read:
 
@@ -290,27 +299,42 @@ Current baseline quality read:
   - `tradable_classifier` average precision: `0.2924`
   - `tradable_classifier` ROC AUC: `0.5151`
 - current second baseline with environment daily context:
-  - `upside_regression` spearman rank corr: `0.0441`
-  - `downside_regression` spearman rank corr: `0.1169`
-  - `grid_pnl_regression` spearman rank corr: `-0.0436`
-  - `positive_grid_day_classifier` average precision: `0.3734`
-  - `positive_grid_day_classifier` ROC AUC: `0.4775`
-  - `tradable_classifier` average precision: `0.3564`
-  - `tradable_classifier` ROC AUC: `0.5616`
-  - `trend_break_risk_classifier` average precision: `0.1391`
-  - `trend_break_risk_classifier` ROC AUC: `0.4951`
-  - `vwap_reversion_classifier` average precision: `0.3077`
-  - `vwap_reversion_classifier` ROC AUC: `0.6395`
+  - `upside_regression` spearman rank corr: `0.0715`
+  - `downside_regression` spearman rank corr: `-0.0109`
+  - `grid_pnl_regression` spearman rank corr: `-0.0439`
+  - `positive_grid_day_classifier` average precision: `0.3764`
+  - `positive_grid_day_classifier` ROC AUC: `0.4765`
+  - `tradable_classifier` average precision: `0.3171`
+  - `tradable_classifier` ROC AUC: `0.5310`
+  - `trend_break_risk_classifier` average precision: `0.1464`
+  - `trend_break_risk_classifier` ROC AUC: `0.5112`
+  - `vwap_reversion_classifier` average precision: `0.3184`
+  - `vwap_reversion_classifier` ROC AUC: `0.5939`
   - calibrated threshold recommendations:
-    - `positive_grid_day_classifier`: `0.30`
+    - `positive_grid_day_classifier`: `0.35`
     - `tradable_classifier`: `0.35`
     - `trend_break_risk_classifier`: `0.30`
-    - `vwap_reversion_classifier`: `0.30`
+    - `vwap_reversion_classifier`: `0.25`
   - calibrated test-set behavior:
     - `positive_grid_day_classifier` precision / recall: `0.3456 / 0.5839`
-    - `tradable_classifier` precision / recall: `0.3478 / 0.2623`
-    - `trend_break_risk_classifier` precision / recall: `0.2000 / 0.0526`
-    - `vwap_reversion_classifier` precision / recall: `0.3028 / 0.5443`
+    - `tradable_classifier` precision / recall: `0.3404 / 0.2602`
+    - `trend_break_risk_classifier` precision / recall: `0.1333 / 0.0351`
+    - `vwap_reversion_classifier` precision / recall: `0.2324 / 0.5244`
+
+Validated facts from the first baseline quality analysis pass:
+
+- `SAFE` currently covers `352 / 431` test days (`81.67%`)
+- `NORMAL` currently covers `79 / 431` test days (`18.33%`)
+- `AGGRESSIVE` and `OFF` were not triggered on the current test slice
+- `SAFE` replay mean is `-0.00618`
+- `NORMAL` replay mean is `-0.00532`
+- this means current mode gating is still too weak to create strong strategy-level separation
+- current `downside_regression` importance is concentrated in:
+  - `ma20`
+  - `ma60`
+  - `stk_m_realized_volatility`
+  - recent volatility / large-vwap-deviation rolling features
+- this suggests the current downside head is leaning more on medium-horizon volatility regime context than on a sharp next-day hostile selloff signature
 
 Interpretation:
 
@@ -319,8 +343,9 @@ Interpretation:
 - daily environment context plus threshold calibration still provide useful lift for `tradable_classifier` and `vwap_reversion_classifier`
 - `trend_break_risk_classifier` is no longer broken by an ultra-sparse label slice, but its discrimination is still weak and it should stay a research / soft-constraint head
 - `grid_pnl_regression` remains unsuitable for direct live parameter control
+- `downside_regression` has materially weakened in the latest rerun and now requires explicit target / feature diagnosis before further live use
 - the system is **not ready for direct live deployment**
-- next gains will likely require stronger labels and richer context rather than more tuning on this exact slice
+- next gains will likely require stronger labels, richer context, and a better explanation of why the current `SAFE` vs `NORMAL` split is not separating replay quality enough
 
 ### 5. Daily Signal Export
 
@@ -341,15 +366,15 @@ Completed first-slice outputs:
 
 Validated facts from the latest signal export:
 
-- feature date: `2026-04-14`
-- signal for date: `2026-04-15`
-- `pred_upside_t1`: `0.0224`
-- `pred_downside_t1`: `-0.0393`
-- `pred_positive_grid_day_t1`: `0.1977`
-- `pred_tradable_score_t1`: `0.0835`
-- `pred_trend_break_risk_t1`: `0.0618`
-- `pred_vwap_reversion_score_t1`: `0.3350`
-- `pred_grid_pnl_t1`: `-0.0126`
+- feature date: `2026-04-17`
+- signal for date: `2026-04-20`
+- `pred_upside_t1`: `0.0280`
+- `pred_downside_t1`: `-0.0415`
+- `pred_positive_grid_day_t1`: `0.3200`
+- `pred_tradable_score_t1`: `0.0793`
+- `pred_trend_break_risk_t1`: `0.0235`
+- `pred_vwap_reversion_score_t1`: `0.1520`
+- `pred_grid_pnl_t1`: `-0.0381`
 - `recommended_mode`: `SAFE`
 - `position_scale`: `0.55`
 - `grid_width_scale`: `1.10`
@@ -414,10 +439,11 @@ Mitigation:
 
 ## Immediate Next Steps
 
-1. Feed a real `overnight_factors.csv` into the already-wired overnight feature hook and retrain the next baseline
-2. Keep `grid_pnl_regression` as a research head and let `positive_grid_day_classifier` carry production gating
-3. Continue improving `trend_break_risk_classifier` with richer overnight and gap context; the label slice is now trainable but still weak
-4. Re-evaluate the exported daily signal behavior after overnight factors are merged
+1. Read `analysis/safe_mode_replay_summary.csv` and confirm whether `SAFE` days are truly worse enough to justify live gating
+2. Read `analysis/downside_error_cases.csv` and inspect why the worst `downside` misses include multiple positive next-day downside values
+3. Use `analysis/head_feature_importance.csv` to check whether `downside_regression` is overweighting slow regime features versus next-day hostile selloff precursors
+4. Keep `grid_pnl_regression` as a research head and let `positive_grid_day_classifier` remain the main production gate
+5. Only after the baseline quality diagnosis is understood, decide whether the next gain should come from overnight factors, label redesign, or Level2-derived post-close summary features
 
 ## Coordination Rule
 

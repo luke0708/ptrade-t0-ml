@@ -6,6 +6,13 @@ This document defines how the ML system communicates with the PTrade strategy an
 
 The ML system and the PTrade strategy are allowed to be developed in separate conversations, but they must communicate through files and this contract, not through chat memory.
 
+PTrade is assumed to be a closed sandbox with strict runtime limits.
+Therefore:
+
+- heavy model training stays offline
+- daily scoring stays offline
+- PTrade intraday logic only consumes a compact signal file and executes lightweight rules
+
 ## Daily Output Contract
 
 The ML side must generate a daily artifact after the close and before the next trading day starts.
@@ -42,6 +49,20 @@ Recommended files:
 - `AGGRESSIVE`
 
 ## PTrade Mapping Rules
+
+### No Intraday ML Inference Inside PTrade
+
+PTrade should **not**:
+
+- load large training tables
+- regenerate large minute-level feature sets intraday
+- run XGBoost / LightGBM scoring on every tick or Level2 callback
+
+PTrade should instead:
+
+- read the offline daily signal before the session
+- treat that signal as the day-level playbook
+- apply only hard intraday execution rules based on live market state
 
 ### Trend Risk Is Not A Veto
 
@@ -80,6 +101,17 @@ Suggested production priority:
 
 `pred_grid_pnl_t1` may still be exported, but it should be treated as an auxiliary diagnostic rather than the primary live gating signal.
 
+### Level2 Usage Boundary
+
+Level2 can be used intraday, but only for lightweight control logic such as:
+
+- canceling a planned dip-buy
+- reducing position size
+- widening the grid
+- switching from `NORMAL` to `SAFE`
+
+Level2 should not be treated as a trigger to run a second ML model stack inside PTrade.
+
 ## Cross-Conversation Workflow
 
 If the ML work and PTrade work live in separate LLM chats, they must coordinate like this:
@@ -107,7 +139,8 @@ Recommended daily flow:
 2. ML pipeline writes `ml_daily_signal.json`
 3. before `before_trading_start`, PTrade reads the signal file
 4. strategy maps model outputs to mode and risk parameters
-5. intraday strategy executes with ML-adjusted controls
+5. intraday strategy executes with ML-adjusted controls and lightweight Level2 hard rules
+6. if needed, intraday execution facts are summarized after the close and fed back into the next offline ML cycle
 
 ## Minimal Reader Rule
 

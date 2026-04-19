@@ -1,5 +1,15 @@
 # A 股回归数据底座
 
+这是一个面向 `300661` 的专属 T+0 机器学习辅助仓库。
+
+当前固定架构不是“在 PTrade 里盘中跑模型”，而是：
+
+1. 本地离线 ML 在收盘后生成第二天的 `ml_daily_signal.json`
+2. PTrade 在 `before_trading_start` 读取该信号
+3. PTrade 盘中只结合 Level2 做轻量硬规则过滤、降级和参数调整
+
+PTrade 是封闭沙盒，因此当前主线明确**不在盘中运行 XGBoost/LightGBM 推理**。
+
 ## 快速导航
 
 如果你是第一次接手这个仓库，不要先通读全文，先按你的目标分流：
@@ -53,6 +63,13 @@ python -m unittest discover -s tests
 - `Phase 2`：基于 canonical `1m` 的首批生产标签引擎
 - `Phase 3`：基于 canonical `1m` 的首批生产特征引擎（已并入环境日线）
 
+当前主线优先级是：
+
+- 先做 baseline 质量复盘
+- 先解释 `SAFE/NORMAL` 为什么分离度不足
+- 先解释 `downside_regression` 为什么失真
+- 然后再决定是否修复目标、补 overnight 因子、还是引入 Level2 收盘摘要特征
+
 ## 接手入口
 
 如果你是在**新机器**、**新会话**或**新的大模型代理**里接手这个仓库，先看上面的“快速导航”，再继续阅读下面两个部分：
@@ -88,6 +105,14 @@ python -m unittest discover -s tests
 - [ptrade_signal_contract.md](</E:/AI炒股/机器学习/docs/ptrade_signal_contract.md>)
 - [ml_implementation_plan.md](</E:/AI炒股/机器学习/docs/ml_implementation_plan.md>)
 - [ml_progress.md](</E:/AI炒股/机器学习/docs/ml_progress.md>)
+
+如果你当前接手的是“模型质量诊断”而不是“补数”，还应优先关注：
+
+- `analysis/baseline_test_predictions.csv`
+- `analysis/head_bucket_summary.csv`
+- `analysis/safe_mode_replay_summary.csv`
+- `analysis/downside_error_cases.csv`
+- `analysis/head_feature_importance.csv`
 
 ## 目录结构
 
@@ -130,6 +155,7 @@ E:\AI炒股\机器学习
   - `.venv/`
   - `vendor/`、`env/`、`lib/` 这类本机依赖目录
   - `data/` 下的大体量原始数据、训练产物、信号文件
+  - `analysis/` 下的本地质量复盘产物
   - `models/` 下模型权重与临时文件
   - `plots/` 下图片产物
 
@@ -158,6 +184,11 @@ E:\AI炒股\机器学习
 
 - 安装 `git`
 - 安装 `Python 3.11+`
+- 如果后续要训练 `xgboost` baseline，Mac 上还需要安装 OpenMP 运行库：
+
+```bash
+brew install libomp
+```
 
 2. 克隆仓库
 
@@ -178,6 +209,12 @@ python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_t
 ```
 
 这台 Mac 当前已验证的解释器是 `python3.12`。`setup_venv_mac.sh` 会自动选择 `python3.12` 或 `python3.11` 创建 `.venv`。如果仓库里已有完整的 `vendor/` 依赖，它会自动接入虚拟环境；否则请在激活 `.venv` 后执行：
+
+如果这里在 `xgboost` 导入时报 `libomp.dylib` 缺失，不是 Python 包没装全，而是系统缺少 OpenMP 运行库。先执行：
+
+```bash
+brew install libomp
+```
 
 ```bash
 pip install -r requirements-dev.txt
@@ -201,6 +238,12 @@ python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pand
 ```
 
 默认情况下，`setup_vendor_env_mac.sh` 会安装 `requirements-dev.txt`，也就是完整算法开发依赖。`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
+
+同样地，如果 `xgboost` 报 `libomp.dylib` 缺失，也要先执行：
+
+```bash
+brew install libomp
+```
 
 4. 连接 OneDrive 数据目录
 
@@ -803,14 +846,9 @@ data/ml_daily_signal.csv
   - 暴露当前特征与标签仍然偏弱
   - 为下一轮标签增强和环境特征回补提供对照组
 
-## 旧流程兼容
+## 当前执行原则
 
-项目中原有的：
-
-- `fetch_data.py`
-- `feature_engineering.py`
-- `generate_labels.py`
-- `train_model.py`
-- `daily_predict.py`
-
-仍然保留，但它们对应的是更早的一版 T+0 ML 流程，不等同于当前这套“日线 + 分钟线 + 回归目标”的新底座设计。
+- 不在 PTrade 盘中运行复杂模型推理
+- 盘中 Level2 只用于硬规则过滤和降级
+- 收盘后的离线 ML 才负责输出第二天的基础 playbook
+- 在 `SAFE/NORMAL` 分离度和 `downside` 目标问题没看清之前，不继续堆更复杂模型

@@ -178,6 +178,30 @@ class ProjectConfig:
         return self.foundation_dir / f"{self.stock_symbol}_{self.stock_exchange}_training_dataset.csv"
 
     @property
+    def analysis_dir(self) -> Path:
+        return self.base_dir / "analysis"
+
+    @property
+    def baseline_test_predictions_path(self) -> Path:
+        return self.analysis_dir / "baseline_test_predictions.csv"
+
+    @property
+    def head_bucket_summary_path(self) -> Path:
+        return self.analysis_dir / "head_bucket_summary.csv"
+
+    @property
+    def safe_mode_replay_summary_path(self) -> Path:
+        return self.analysis_dir / "safe_mode_replay_summary.csv"
+
+    @property
+    def downside_error_cases_path(self) -> Path:
+        return self.analysis_dir / "downside_error_cases.csv"
+
+    @property
+    def head_feature_importance_path(self) -> Path:
+        return self.analysis_dir / "head_feature_importance.csv"
+
+    @property
     def overnight_factors_path(self) -> Path:
         return self.data_dir / "overnight_factors.csv"
 

@@ -17,6 +17,7 @@ __pycache__/
 tmp*
 
 /data
+/analysis
 
 # 临时文件
 data/tmp*
