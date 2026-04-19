@@ -1,5 +1,34 @@
 # A 股回归数据底座
 
+## 快速导航
+
+如果你是第一次接手这个仓库，不要先通读全文，先按你的目标分流：
+
+- 我在 **Mac** 上接手开发
+  - 先看 [docs/cross_machine_dev_guide.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/cross_machine_dev_guide.md)
+  - 优先执行 `bash setup_venv_mac.sh`
+  - 如果只是补数或轻量运行，可退回 `setup_vendor_env_mac.sh`
+- 我在 **Windows** 上接手开发
+  - 先看 [docs/cross_machine_dev_guide.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/cross_machine_dev_guide.md)
+  - 使用本机 `.venv`
+  - 使用 `setup_data_link.ps1` 连接 OneDrive 数据目录
+- 我的目标是 **机器学习算法开发**
+  - 不要只装 `requirements.txt`
+  - 必须使用完整开发环境，也就是 `requirements-dev.txt`
+  - 只有导入检查和 `unittest` 通过，才算真正完成接手
+- 我的目标只是 **补数 / 看代码 / 跑轻量脚本**
+  - `requirements.txt` 即可
+  - 这不等于已经具备完整算法开发能力
+
+接手开发的最低验收标准：
+
+```bash
+python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+python -m unittest discover -s tests
+```
+
+如果上面两步还没通过，说明当前机器还不是完整算法开发环境。
+
 一个面向 `300661` 次日高低点幅度回归任务的本地数据底座项目。当前方案以 `AkShare` 为主，优先使用东方财富相关接口；当部分接口不稳定时，允许切换到 `AkShare` 的新浪后备接口，并在日志与 README 中明确记录限制。
 
 当前目标不是分类，而是为两个回归模型准备训练数据：
@@ -23,6 +52,13 @@
 - `Phase 1`：`300661` 长历史 `1m` 规范化与审计
 - `Phase 2`：基于 canonical `1m` 的首批生产标签引擎
 - `Phase 3`：基于 canonical `1m` 的首批生产特征引擎（已并入环境日线）
+
+## 接手入口
+
+如果你是在**新机器**、**新会话**或**新的大模型代理**里接手这个仓库，先看上面的“快速导航”，再继续阅读下面两个部分：
+
+1. 本文档的“开发环境模式”
+2. [docs/cross_machine_dev_guide.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/cross_machine_dev_guide.md)
 
 ## 当前结论
 
