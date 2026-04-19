@@ -14,6 +14,10 @@ tmp*
 data/*
 !data/.gitkeep
 
+# 临时文件
+data/tmp*
+scratch/
+
 models/*
 !models/.gitkeep
 
