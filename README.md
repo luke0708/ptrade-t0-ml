@@ -92,6 +92,7 @@ E:\AI炒股\机器学习
   - 脚本入口文件
 - 不上传：
   - `.venv/`
+  - `vendor/`、`env/`、`lib/` 这类本机依赖目录
   - `data/` 下的大体量原始数据、训练产物、信号文件
   - `models/` 下模型权重与临时文件
   - `plots/` 下图片产物
@@ -107,7 +108,7 @@ E:\AI炒股\机器学习
 1. 安装基础环境
 
 - 安装 `git`
-- 安装 `Python 3.11`
+- 安装 `Python 3.11+`
 
 2. 克隆仓库
 
@@ -116,7 +117,9 @@ git clone <你的 GitHub 仓库地址>
 cd 机器学习
 ```
 
-3. 创建虚拟环境并安装依赖
+3. 安装依赖
+
+优先使用虚拟环境：
 
 ```bash
 python3.11 -m venv .venv
@@ -125,7 +128,30 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-4. 补回本地数据
+如果当前 Mac 因权限或隐藏目录策略不方便创建 `.venv/`，可以改用本地 `vendor/` 方案：
+
+```bash
+bash setup_vendor_env_mac.sh
+source activate_vendor_env.sh
+python3.12 -c "import pandas, akshare; print('vendor ok')"
+```
+
+`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
+
+4. 连接 OneDrive 数据目录
+
+```bash
+bash setup_data_link_mac.sh
+ls -ld data
+```
+
+如果自动检测失败，可以显式指定 OneDrive 目录：
+
+```bash
+ONEDRIVE_DATA_PATH="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml" bash setup_data_link_mac.sh
+```
+
+5. 补回本地数据
 
 由于 `data/` 和 `models/` 默认不进 Git，Mac 端需要你自己补回这些文件，至少包括：
 
@@ -138,7 +164,7 @@ pip install -r requirements.txt
 - `data/soxx_daily.csv`
 - `data/nasdaq_daily.csv`
 
-5. 按顺序重建产物
+6. 按顺序重建产物
 
 ```bash
 python build_minute_foundation.py
@@ -148,7 +174,7 @@ python train_baseline_models.py
 python export_ml_daily_signal.py
 ```
 
-6. 日常协作方式
+7. 日常协作方式
 
 - Windows 改完后：`git add/commit/push`
 - Mac 拉最新：`git pull`
@@ -173,6 +199,28 @@ python export_ml_daily_signal.py
 收盘后您只需要在终端里执行以下命令就可以一键补齐所有数据
 cd E:\AI炒股\机器学习
 python daily_backfill_data.py
+
+
+`daily_backfill_data_mac.py` (Mac 独立补数入口)
+
+- 为 Mac 单独准备的增量补数脚本，不依赖 Windows PowerShell。
+- `512480`、`399006` 日线通过 `AkShare` 直接抓取并按 `date` 去重更新。
+- `300661_SZ_1m_ptrade.csv` 仍使用 `AkShare` 东方财富分钟接口，并保留 `open=0.0` 修复、`datetime` 去重和 `price` 字段补齐逻辑。
+
+在 Mac 上可直接执行：
+
+```bash
+cd ~/Developer/ptrade-t0-ml
+python3.12 daily_backfill_data_mac.py
+```
+
+如果你使用的是 `vendor/` 模式，运行其他依赖脚本前先执行：
+
+```bash
+cd ~/Developer/ptrade-t0-ml
+source activate_vendor_env.sh
+python3.12 build_minute_foundation.py
+```
 
 
 `data_updater.py`

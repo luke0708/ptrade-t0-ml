@@ -1,19 +1,42 @@
 #!/bin/bash
+set -euo pipefail
 # ============================================================
 # setup_data_link_mac.sh
 # 用途：Mac 电脑将项目 data/ 目录软链接到 OneDrive 共享数据目录
 # 使用前提：OneDrive 已安装并同步
 # ============================================================
 
-# ⚠️ 根据你的 Mac OneDrive 路径修改下面这行
-ONEDRIVE_DATA_PATH="$HOME/Library/CloudStorage/OneDrive-Personal/Development/data_bundle/ptrade-t0-ml"
-# 如果你的 OneDrive 路径不同，可以运行以下命令查找：
-# ls ~/Library/CloudStorage/
+resolve_onedrive_data_path() {
+    if [ -n "${ONEDRIVE_DATA_PATH:-}" ]; then
+        printf '%s\n' "$ONEDRIVE_DATA_PATH"
+        return 0
+    fi
+
+    local candidate
+    for candidate in "$HOME"/Library/CloudStorage/OneDrive*; do
+        if [ -d "$candidate" ]; then
+            printf '%s\n' "$candidate/Development/data_bundle/ptrade-t0-ml"
+            return 0
+        fi
+    done
+
+    return 1
+}
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DATA_PATH="$PROJECT_DIR/data"
+ONEDRIVE_DATA_PATH="$(resolve_onedrive_data_path || true)"
 
 echo "=== ptrade-t0-ml 数据目录配置 (Mac) ==="
+
+if [ -z "$ONEDRIVE_DATA_PATH" ]; then
+    echo "❌ 未找到 OneDrive 目录。"
+    echo "请先确认 OneDrive 已登录并完成同步，或手动指定环境变量："
+    echo "ONEDRIVE_DATA_PATH=\"\$HOME/Library/CloudStorage/OneDrive-xxx/Development/data_bundle/ptrade-t0-ml\" bash setup_data_link_mac.sh"
+    exit 1
+fi
+
+echo "使用 OneDrive 数据目录: $ONEDRIVE_DATA_PATH"
 
 # 1. 确保 OneDrive 数据目录存在（等待 OneDrive 同步）
 if [ ! -d "$ONEDRIVE_DATA_PATH" ]; then

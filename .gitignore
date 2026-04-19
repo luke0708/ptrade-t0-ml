@@ -1,4 +1,9 @@
 .venv/
+vendor/
+env/
+lib/
+get-pip.py
+test_imports.py
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -11,8 +16,7 @@ __pycache__/
 *.log
 tmp*
 
-data/*
-!data/.gitkeep
+/data
 
 # 临时文件
 data/tmp*
