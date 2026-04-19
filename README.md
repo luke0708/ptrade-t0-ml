@@ -103,6 +103,19 @@ E:\AI炒股\机器学习
 - 避免把几十 MB 到上百 MB 的原始分钟数据直接塞进 Git 历史
 - 避免把临时训练产物和本地环境噪音带进协作仓库
 
+## 开发环境模式
+
+为了让另一台机器能够“读 README 就接手开发”，这里明确区分两种模式：
+
+- `requirements.txt`
+  - 最小运行依赖
+  - 适用于数据补数、轻量 CSV 处理、只跑基础脚本
+- `requirements-dev.txt`
+  - 完整算法开发依赖
+  - 适用于特征工程、标签构建、baseline 训练、单元测试
+
+如果你的目标是**接手机器学习开发**，不要只安装 `requirements.txt`，而是要使用完整开发环境。
+
 ### Mac 电脑如何继续开发
 
 1. 安装基础环境
@@ -117,15 +130,30 @@ git clone <你的 GitHub 仓库地址>
 cd 机器学习
 ```
 
-3. 安装依赖
+3. 安装完整开发环境
 
 优先使用虚拟环境：
 
 ```bash
-python3.11 -m venv .venv
+bash setup_venv_mac.sh
+source .venv/bin/activate
+python -V
+python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+```
+
+这台 Mac 当前已验证的解释器是 `python3.12`。`setup_venv_mac.sh` 会自动选择 `python3.12` 或 `python3.11` 创建 `.venv`。如果仓库里已有完整的 `vendor/` 依赖，它会自动接入虚拟环境；否则请在激活 `.venv` 后执行：
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+如果你明确要手动创建，也请使用实际存在的解释器，例如：
+
+```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 如果当前 Mac 因权限或隐藏目录策略不方便创建 `.venv/`，可以改用本地 `vendor/` 方案：
@@ -133,10 +161,10 @@ pip install -r requirements.txt
 ```bash
 bash setup_vendor_env_mac.sh
 source activate_vendor_env.sh
-python3.12 -c "import pandas, akshare; print('vendor ok')"
+python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta; print('vendor ok')"
 ```
 
-`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
+默认情况下，`setup_vendor_env_mac.sh` 会安装 `requirements-dev.txt`，也就是完整算法开发依赖。`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
 
 4. 连接 OneDrive 数据目录
 
@@ -187,6 +215,17 @@ python export_ml_daily_signal.py
 - `docs/model_spec.md`
 - `docs/ptrade_signal_contract.md`
 - `docs/ml_progress.md`
+
+### 接手开发后的验收命令
+
+无论是 Mac 还是 Windows，只要是“接手算法开发”，都建议先跑这组检查：
+
+```bash
+python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+python -m unittest discover -s tests
+```
+
+如果上面两步不能通过，说明当前机器还没有进入“完整开发环境”，不能直接开始算法开发。
 
 ## 主要脚本
 

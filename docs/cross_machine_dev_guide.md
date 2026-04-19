@@ -27,6 +27,19 @@
 - 数据（重量，几十 MB 到几 GB）→ OneDrive 同步，避免污染 Git 历史
 - `data/` 目录在两台机器上都是指向 OneDrive 的**软链接（Junction/Symlink）**，代码路径写法完全一致，无需任何修改
 
+### 环境模式约定
+
+为了避免“读完文档但仍然不能接手开发”，这里明确区分：
+
+- `requirements.txt`
+  - 最小运行依赖
+  - 适用于补数、轻量数据处理
+- `requirements-dev.txt`
+  - 完整算法开发依赖
+  - 适用于特征工程、模型训练、单元测试
+
+凡是要接手机器学习开发，都应以 `requirements-dev.txt` 为准，而不是只安装 `requirements.txt`。
+
 ---
 
 ## 二、目录与路径约定
@@ -83,9 +96,25 @@ cd ptrade-t0-ml
 优先使用虚拟环境：
 
 ```bash
-python3.11 -m venv .venv
+bash setup_venv_mac.sh
 source .venv/bin/activate
-pip install -r requirements.txt
+python -V
+python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+```
+
+这台 Mac 当前已验证的解释器是 `python3.12`。`setup_venv_mac.sh` 会自动选择 `python3.12` 或 `python3.11` 创建 `.venv`。如果仓库里已有完整的 `vendor/` 依赖，它会自动接入虚拟环境；否则请在激活 `.venv` 后执行：
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+如果你明确要手动创建，也请使用实际存在的解释器，例如：
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements-dev.txt
 ```
 
 如果这台 Mac 对隐藏目录 `.venv/` 有权限限制，可以改用本地 `vendor/` 模式：
@@ -93,10 +122,10 @@ pip install -r requirements.txt
 ```bash
 bash setup_vendor_env_mac.sh
 source activate_vendor_env.sh
-python3.12 -c "import pandas, akshare; print('vendor ok')"
+python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta; print('vendor ok')"
 ```
 
-> `activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
+> 默认情况下，`setup_vendor_env_mac.sh` 会安装 `requirements-dev.txt`，也就是完整算法开发依赖。`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
 
 **Step 3**：等待 OneDrive 把 Windows 上传的数据同步完成，然后运行软链接脚本
 
@@ -224,6 +253,15 @@ git pull origin main
 
 ### 4.3 推荐的日常开发顺序
 
+```
+
+### 4.4 接手算法开发的最低验收标准
+
+以下两步都通过，才算“这台机器已经可接手开发”：
+
+```bash
+python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+python -m unittest discover -s tests
 ```
 每天开始工作时：
   1. git pull                   ← 先拉最新代码
