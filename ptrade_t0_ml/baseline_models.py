@@ -57,6 +57,11 @@ CLASSIFICATION_HEAD_RULES = {
         "min_precision_floor": 0.10,
         "max_positive_rate_multiplier": 3.00,
     },
+    "hostile_selloff_risk_classifier": {
+        "beta": 2.5,
+        "min_precision_floor": 0.15,
+        "max_positive_rate_multiplier": 2.50,
+    },
     "vwap_reversion_classifier": {
         "beta": 1.5,
         "min_precision_floor": 0.20,
@@ -111,6 +116,37 @@ def get_feature_columns(training_df: pd.DataFrame) -> list[str]:
         if column not in EXCLUDED_FEATURE_COLUMNS
         and not any(column.startswith(prefix) for prefix in EXCLUDED_FEATURE_PREFIXES)
     ]
+
+
+def build_feature_leakage_audit(training_df: pd.DataFrame, feature_columns: list[str]) -> dict[str, object]:
+    excluded_reference_columns_present = sorted(
+        column for column in training_df.columns if column in EXCLUDED_FEATURE_COLUMNS
+    )
+    excluded_prefixed_columns_present = sorted(
+        column
+        for column in training_df.columns
+        if any(column.startswith(prefix) for prefix in EXCLUDED_FEATURE_PREFIXES)
+    )
+    selected_feature_violations = sorted(
+        column
+        for column in feature_columns
+        if column in EXCLUDED_FEATURE_COLUMNS
+        or any(column.startswith(prefix) for prefix in EXCLUDED_FEATURE_PREFIXES)
+    )
+    if selected_feature_violations:
+        raise ValueError(
+            "Feature leakage audit failed. Selected feature columns still contain forbidden future/label fields: "
+            f"{selected_feature_violations}"
+        )
+
+    return {
+        "training_frame_column_count": int(len(training_df.columns)),
+        "selected_feature_column_count": int(len(feature_columns)),
+        "excluded_reference_columns_present": excluded_reference_columns_present,
+        "excluded_prefixed_columns_present": excluded_prefixed_columns_present,
+        "selected_feature_violations": selected_feature_violations,
+        "leakage_guard_passed": True,
+    }
 
 
 def build_xgb_regressor(config: ProjectConfig):
@@ -323,6 +359,7 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
     save_dataframe(training_df, config.training_dataset_path)
 
     feature_columns = get_feature_columns(training_df)
+    leakage_audit = build_feature_leakage_audit(training_df, feature_columns)
     train_df, test_df = split_train_test(training_df, config.test_ratio)
     classifier_train_df, classifier_validation_df = split_train_test(train_df, config.recall_tuning.validation_ratio)
     X_train = train_df[feature_columns]
@@ -354,6 +391,7 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         "positive_grid_day_classifier": "target_positive_grid_day_t1",
         "tradable_classifier": "target_tradable_score_t1",
         "trend_break_risk_classifier": "target_trend_break_risk_t1",
+        "hostile_selloff_risk_classifier": "target_hostile_selloff_risk_t1",
         "vwap_reversion_classifier": "target_vwap_reversion_t1",
     }
     for head_name, target_column in classification_targets.items():
@@ -407,6 +445,7 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         "test_start_date": str(test_df.iloc[0]["date"]),
         "test_end_date": str(test_df.iloc[-1]["date"]),
         "model_params": asdict(config.model_params),
+        "leakage_audit": leakage_audit,
         "heads": heads,
     }
     atomic_write_json(config.baseline_metadata_path, metadata)
@@ -419,6 +458,11 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         metadata["test_rows"],
         metadata["test_start_date"],
         metadata["test_end_date"],
+    )
+    LOGGER.info(
+        "Leakage audit: excluded_reference_columns=%s excluded_prefixed_columns=%s",
+        len(leakage_audit["excluded_reference_columns_present"]),
+        len(leakage_audit["excluded_prefixed_columns_present"]),
     )
     return metadata
 

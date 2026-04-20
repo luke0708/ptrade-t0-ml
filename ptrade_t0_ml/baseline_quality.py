@@ -34,6 +34,23 @@ HEAD_TO_SIGNAL_FIELD = {
 }
 
 DOWNSIDE_CONTEXT_COLUMNS = [
+    "next_day_gap_return_t1",
+    "target_downside_from_open_t1",
+    "target_downside_from_max_anchor_t1",
+    "target_hostile_selloff_risk_t1",
+    "target_downside_positive_flag_t1",
+    "target_downside_large_positive_flag_t1",
+    "target_upside_extreme_flag_t1",
+    "next_day_large_gap_flag_t1",
+    "next_day_suspicious_abnormal_jump_flag_t1",
+    "next_day_open30_low_return",
+    "next_day_open60_low_return",
+    "next_day_low_in_first_hour_flag",
+    "next_day_close_vs_anchor_return",
+    "next_day_close_recovery_ratio_from_early_low",
+    "next_day_negative_vwap_ratio",
+    "next_day_hostile_selloff_soft_score",
+    "next_day_hostile_selloff_extreme_t1",
     "daily_return",
     "gap_pct",
     "atr_pct",
@@ -100,6 +117,67 @@ def build_mode_replay_summary(predictions_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(segments)
 
 
+def build_controller_interaction_summary(predictions_df: pd.DataFrame) -> pd.DataFrame:
+    total_rows = len(predictions_df)
+    positive_grid_on = predictions_df["pred_positive_grid_day_t1"] >= predictions_df["pred_positive_grid_day_t1_threshold"]
+    tradable_on = predictions_df["pred_tradable_score_t1"] >= predictions_df["pred_tradable_score_t1_threshold"]
+    trend_high = predictions_df["pred_trend_break_risk_t1"] >= predictions_df["pred_trend_break_risk_t1_threshold"]
+    hostile_high = (
+        predictions_df["pred_hostile_selloff_risk_t1"] >= predictions_df["pred_hostile_selloff_risk_t1_threshold"]
+    )
+    vwap_on = predictions_df["pred_vwap_reversion_score_t1"] >= predictions_df["pred_vwap_reversion_score_t1_threshold"]
+
+    segment_masks = {
+        "pg_tr_on_hs_on": positive_grid_on & tradable_on & hostile_high,
+        "pg_tr_on_hs_off": positive_grid_on & tradable_on & ~hostile_high,
+        "pg_or_tr_off_hs_on": ~(positive_grid_on & tradable_on) & hostile_high,
+        "trend_high_hs_high": trend_high & hostile_high,
+        "trend_high_hs_low": trend_high & ~hostile_high,
+        "trend_low_hs_high": ~trend_high & hostile_high,
+        "vwap_on_hs_on": vwap_on & hostile_high,
+        "vwap_on_hs_off": vwap_on & ~hostile_high,
+    }
+
+    rows: list[dict[str, object]] = []
+    for segment_name, mask in segment_masks.items():
+        subset = predictions_df.loc[mask].copy()
+        if subset.empty:
+            rows.append(
+                {
+                    "segment_name": segment_name,
+                    "rows": 0,
+                    "share_of_test_days": 0.0,
+                    "grid_pnl_mean": 0.0,
+                    "grid_pnl_p10": 0.0,
+                    "worst_day_grid_pnl": 0.0,
+                    "positive_grid_day_rate": 0.0,
+                    "tradable_rate": 0.0,
+                    "trend_break_risk_rate": 0.0,
+                    "hostile_selloff_risk_rate": 0.0,
+                    "vwap_reversion_rate": 0.0,
+                }
+            )
+            continue
+
+        rows.append(
+            {
+                "segment_name": segment_name,
+                "rows": int(len(subset)),
+                "share_of_test_days": float(len(subset) / total_rows) if total_rows else 0.0,
+                "grid_pnl_mean": float(subset["target_grid_pnl_t1"].mean()),
+                "grid_pnl_p10": float(subset["target_grid_pnl_t1"].quantile(0.10)),
+                "worst_day_grid_pnl": float(subset["target_grid_pnl_t1"].min()),
+                "positive_grid_day_rate": float(subset["target_positive_grid_day_t1"].mean()),
+                "tradable_rate": float(subset["target_tradable_score_t1"].mean()),
+                "trend_break_risk_rate": float(subset["target_trend_break_risk_t1"].mean()),
+                "hostile_selloff_risk_rate": float(subset["target_hostile_selloff_risk_t1"].mean()),
+                "vwap_reversion_rate": float(subset["target_vwap_reversion_t1"].mean()),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def select_downside_error_cases(
     predictions_df: pd.DataFrame,
     top_n: int = DEFAULT_TOP_N,
@@ -159,6 +237,8 @@ def select_downside_error_cases(
         "target_tradable_score_t1",
         "pred_trend_break_risk_t1",
         "target_trend_break_risk_t1",
+        "pred_hostile_selloff_risk_t1",
+        "target_hostile_selloff_risk_t1",
         "pred_vwap_reversion_score_t1",
         "target_vwap_reversion_t1",
         "position_scale",
@@ -184,6 +264,7 @@ def build_baseline_quality_report(
     predictions_df = _score_test_dataset(config, metadata, test_df, bucket_count=bucket_count)
     bucket_summary_df = _build_head_bucket_summary(predictions_df, metadata)
     mode_summary_df = build_mode_replay_summary(predictions_df)
+    controller_interaction_df = build_controller_interaction_summary(predictions_df)
     downside_cases_df = select_downside_error_cases(predictions_df, top_n=downside_top_n)
     feature_importance_df = _extract_head_feature_importance(
         config,
@@ -194,12 +275,14 @@ def build_baseline_quality_report(
     save_dataframe(predictions_df, config.baseline_test_predictions_path)
     save_dataframe(bucket_summary_df, config.head_bucket_summary_path)
     save_dataframe(mode_summary_df, config.safe_mode_replay_summary_path)
+    save_dataframe(controller_interaction_df, config.controller_interaction_summary_path)
     save_dataframe(downside_cases_df, config.downside_error_cases_path)
     save_dataframe(feature_importance_df, config.head_feature_importance_path)
 
     LOGGER.info("Saved baseline test predictions to: %s", config.baseline_test_predictions_path)
     LOGGER.info("Saved head bucket summary to: %s", config.head_bucket_summary_path)
     LOGGER.info("Saved safe-mode replay summary to: %s", config.safe_mode_replay_summary_path)
+    LOGGER.info("Saved controller interaction summary to: %s", config.controller_interaction_summary_path)
     LOGGER.info("Saved downside error cases to: %s", config.downside_error_cases_path)
     LOGGER.info("Saved head feature importance to: %s", config.head_feature_importance_path)
 
@@ -207,6 +290,7 @@ def build_baseline_quality_report(
         "baseline_test_predictions": config.baseline_test_predictions_path,
         "head_bucket_summary": config.head_bucket_summary_path,
         "safe_mode_replay_summary": config.safe_mode_replay_summary_path,
+        "controller_interaction_summary": config.controller_interaction_summary_path,
         "downside_error_cases": config.downside_error_cases_path,
         "head_feature_importance": config.head_feature_importance_path,
     }
@@ -250,9 +334,15 @@ def _score_test_dataset(
         "target_positive_grid_day_t1",
         "target_tradable_score_t1",
         "target_trend_break_risk_t1",
+        "target_hostile_selloff_risk_t1",
         "target_vwap_reversion_t1",
     ]
-    output_columns.extend(column for column in DOWNSIDE_CONTEXT_COLUMNS if column in test_df.columns)
+    existing_output_columns = set(output_columns)
+    output_columns.extend(
+        column
+        for column in DOWNSIDE_CONTEXT_COLUMNS
+        if column in test_df.columns and column not in existing_output_columns
+    )
     predictions_df = test_df[output_columns].copy().reset_index(drop=True)
 
     for head_name, signal_field in REGRESSION_HEAD_TO_SIGNAL_FIELD.items():
@@ -336,6 +426,7 @@ def _build_head_bucket_summary(
                     "positive_grid_day_rate": float(subset["target_positive_grid_day_t1"].mean()),
                     "tradable_rate": float(subset["target_tradable_score_t1"].mean()),
                     "trend_break_risk_rate": float(subset["target_trend_break_risk_t1"].mean()),
+                    "hostile_selloff_risk_rate": float(subset["target_hostile_selloff_risk_t1"].mean()),
                     "vwap_reversion_rate": float(subset["target_vwap_reversion_t1"].mean()),
                 }
             )
@@ -403,6 +494,7 @@ def _summarize_mode_segment(
             "positive_grid_day_rate": 0.0,
             "tradable_rate": 0.0,
             "trend_break_risk_rate": 0.0,
+            "hostile_selloff_risk_rate": 0.0,
             "vwap_reversion_rate": 0.0,
             "upside_mean": 0.0,
             "downside_mean": 0.0,
@@ -423,6 +515,7 @@ def _summarize_mode_segment(
         "positive_grid_day_rate": float(subset["target_positive_grid_day_t1"].mean()),
         "tradable_rate": float(subset["target_tradable_score_t1"].mean()),
         "trend_break_risk_rate": float(subset["target_trend_break_risk_t1"].mean()),
+        "hostile_selloff_risk_rate": float(subset["target_hostile_selloff_risk_t1"].mean()),
         "vwap_reversion_rate": float(subset["target_vwap_reversion_t1"].mean()),
         "upside_mean": float(subset["target_upside_t1"].mean()),
         "downside_mean": float(subset["target_downside_t1"].mean()),

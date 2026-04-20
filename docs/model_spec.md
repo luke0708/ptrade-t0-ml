@@ -30,6 +30,7 @@ Important runtime constraint:
 
 2. `pred_downside_t1`
 - predicts `target_downside_t1`
+- keep as a research-only regression head for ranking comparison and diagnostics
 
 3. `pred_grid_pnl_t1`
 - predicts `target_grid_pnl_t1`
@@ -46,12 +47,15 @@ Important runtime constraint:
 6. `pred_trend_break_risk_t1`
 - predicts whether next day is hostile to mean reversion
 
-7. `pred_vwap_reversion_score_t1`
+7. `pred_hostile_selloff_risk_t1`
+- predicts whether next day is likely to produce an early hostile selloff that is unfriendly to dip-buy / grid activation
+
+8. `pred_vwap_reversion_score_t1`
 - predicts the quality of next-day VWAP reversion opportunities
 
 ### C. Parameter Suggestion Head
 
-8. `recommended_grid_width_t1`
+9. `recommended_grid_width_t1`
 - predicts or maps to the next-day grid-width multiplier
 
 ## First Production Version
@@ -144,6 +148,7 @@ Recommended future integration:
 - keep `pred_grid_pnl_t1` as a diagnostic / research head
 - prefer `pred_positive_grid_day_t1` as the main production classifier for grid survivability
 - use `pred_tradable_score_t1` as the stricter executable filter
+- use `pred_hostile_selloff_risk_t1` as the preferred downside / dip-buy risk damper
 - treat `pred_trend_break_risk_t1` as a soft constraint, never an absolute veto
 
 ## How The 4 Documents Guide ML

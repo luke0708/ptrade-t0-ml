@@ -4,6 +4,7 @@ import pandas as pd
 
 from ptrade_t0_ml.baseline_quality import (
     assign_score_buckets,
+    build_controller_interaction_summary,
     build_mode_replay_summary,
     select_downside_error_cases,
 )
@@ -26,6 +27,7 @@ class BaselineQualityTests(unittest.TestCase):
                 "target_positive_grid_day_t1": [0, 1, 1, 0],
                 "target_tradable_score_t1": [0, 1, 1, 0],
                 "target_trend_break_risk_t1": [1, 0, 0, 1],
+                "target_hostile_selloff_risk_t1": [1, 0, 0, 1],
                 "target_vwap_reversion_t1": [0, 1, 1, 0],
                 "target_upside_t1": [0.01, 0.02, 0.03, -0.01],
                 "target_downside_t1": [-0.05, -0.02, -0.01, -0.06],
@@ -63,6 +65,8 @@ class BaselineQualityTests(unittest.TestCase):
                 "target_tradable_score_t1": [0, 0, 0, 0],
                 "pred_trend_break_risk_t1": [0.1, 0.1, 0.1, 0.1],
                 "target_trend_break_risk_t1": [0, 0, 0, 0],
+                "pred_hostile_selloff_risk_t1": [0.2, 0.2, 0.2, 0.2],
+                "target_hostile_selloff_risk_t1": [1, 0, 0, 1],
                 "pred_vwap_reversion_score_t1": [0.1, 0.1, 0.1, 0.1],
                 "target_vwap_reversion_t1": [0, 0, 0, 0],
                 "position_scale": [0.55, 0.85, 0.55, 0.2],
@@ -82,6 +86,37 @@ class BaselineQualityTests(unittest.TestCase):
         self.assertTrue(bool(cases_df["in_predicted_worst_top_n"].any()))
         self.assertTrue(bool(cases_df["in_actual_worst_top_n"].any()))
         self.assertTrue(bool(cases_df["in_largest_abs_error_top_n"].any()))
+
+    def test_build_controller_interaction_summary_splits_hostile_and_pg_tr_segments(self) -> None:
+        predictions_df = pd.DataFrame(
+            {
+                "pred_positive_grid_day_t1": [0.40, 0.40, 0.20, 0.20],
+                "pred_positive_grid_day_t1_threshold": [0.35] * 4,
+                "pred_tradable_score_t1": [0.40, 0.40, 0.20, 0.20],
+                "pred_tradable_score_t1_threshold": [0.35] * 4,
+                "pred_trend_break_risk_t1": [0.10, 0.35, 0.10, 0.35],
+                "pred_trend_break_risk_t1_threshold": [0.30] * 4,
+                "pred_hostile_selloff_risk_t1": [0.30, 0.30, 0.10, 0.10],
+                "pred_hostile_selloff_risk_t1_threshold": [0.25] * 4,
+                "pred_vwap_reversion_score_t1": [0.30, 0.30, 0.20, 0.20],
+                "pred_vwap_reversion_score_t1_threshold": [0.25] * 4,
+                "target_grid_pnl_t1": [-0.02, -0.01, 0.01, 0.00],
+                "target_positive_grid_day_t1": [1, 1, 0, 0],
+                "target_tradable_score_t1": [1, 1, 0, 0],
+                "target_trend_break_risk_t1": [0, 1, 0, 1],
+                "target_hostile_selloff_risk_t1": [1, 1, 0, 0],
+                "target_vwap_reversion_t1": [1, 1, 0, 0],
+            }
+        )
+
+        summary_df = build_controller_interaction_summary(predictions_df)
+
+        segment_rows = {row["segment_name"]: row for _, row in summary_df.iterrows()}
+        self.assertEqual(int(segment_rows["pg_tr_on_hs_on"]["rows"]), 2)
+        self.assertEqual(int(segment_rows["pg_tr_on_hs_off"]["rows"]), 0)
+        self.assertEqual(int(segment_rows["trend_high_hs_high"]["rows"]), 1)
+        self.assertAlmostEqual(float(segment_rows["pg_tr_on_hs_on"]["grid_pnl_mean"]), -0.015)
+        self.assertAlmostEqual(float(segment_rows["vwap_on_hs_on"]["positive_grid_day_rate"]), 1.0)
 
 
 if __name__ == "__main__":

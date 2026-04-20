@@ -15,6 +15,8 @@ from .minute_foundation import run_minute_foundation
 
 LOGGER = logging.getLogger(__name__)
 
+ANOMALY_SAMPLE_LIMIT = 20
+
 
 @dataclass(frozen=True)
 class GridReplayResult:
@@ -115,6 +117,98 @@ def _prepare_daily_reference_frame(
         .fillna(replay_config.min_grid_step_pct)
     )
     return df
+
+
+def _safe_return(anchor_price: float, realized_price: float) -> float:
+    if pd.isna(anchor_price) or pd.isna(realized_price) or float(anchor_price) <= 0:
+        return np.nan
+    return float(realized_price / anchor_price - 1.0)
+
+
+def _safe_fraction(numerator: float, denominator: float) -> float:
+    if pd.isna(numerator) or pd.isna(denominator) or float(denominator) == 0:
+        return np.nan
+    return float(numerator / denominator)
+
+
+def _build_price_target_bundle(
+    today_close: float,
+    next_day_open: float,
+    next_day_high: float,
+    next_day_low: float,
+) -> dict[str, float]:
+    max_anchor = max(float(today_close), float(next_day_open))
+    return {
+        "next_day_gap_return_t1": _safe_return(today_close, next_day_open),
+        "target_upside_t1": _safe_return(today_close, next_day_high),
+        "target_downside_t1": _safe_return(today_close, next_day_low),
+        "target_downside_from_open_t1": _safe_return(next_day_open, next_day_low),
+        "target_downside_from_max_anchor_t1": _safe_return(max_anchor, next_day_low),
+    }
+
+
+def _build_target_anomaly_audit(labels_df: pd.DataFrame) -> dict[str, object]:
+    downside_positive_mask = labels_df["target_downside_t1"] > 0.0
+    downside_large_positive_mask = labels_df["target_downside_t1"] > 0.03
+    upside_extreme_mask = labels_df["target_upside_t1"] > 0.10
+    large_gap_mask = labels_df["next_day_gap_return_t1"].abs() > 0.08
+    suspicious_abnormal_jump_mask = downside_large_positive_mask & upside_extreme_mask
+    combined_suspicious_mask = suspicious_abnormal_jump_mask | large_gap_mask
+
+    suspicious_columns = [
+        "date",
+        "next_date",
+        "next_day_gap_return_t1",
+        "target_upside_t1",
+        "target_downside_t1",
+        "target_downside_from_open_t1",
+        "target_downside_from_max_anchor_t1",
+        "next_day_open",
+        "next_day_high",
+        "next_day_low",
+        "today_close",
+    ]
+    suspicious_samples = (
+        labels_df.loc[combined_suspicious_mask, suspicious_columns]
+        .head(ANOMALY_SAMPLE_LIMIT)
+        .to_dict(orient="records")
+    )
+
+    return {
+        "downside_positive_day_count": int(downside_positive_mask.sum()),
+        "downside_positive_day_ratio": float(downside_positive_mask.mean()),
+        "downside_large_positive_day_count": int(downside_large_positive_mask.sum()),
+        "downside_large_positive_day_ratio": float(downside_large_positive_mask.mean()),
+        "upside_extreme_day_count": int(upside_extreme_mask.sum()),
+        "upside_extreme_day_ratio": float(upside_extreme_mask.mean()),
+        "large_gap_day_count": int(large_gap_mask.sum()),
+        "large_gap_day_ratio": float(large_gap_mask.mean()),
+        "suspicious_abnormal_jump_day_count": int(suspicious_abnormal_jump_mask.sum()),
+        "suspicious_abnormal_jump_day_ratio": float(suspicious_abnormal_jump_mask.mean()),
+        "suspicious_abnormal_jump_samples": suspicious_samples,
+    }
+
+
+def _build_target_anomaly_flags(price_target_bundle: dict[str, float]) -> dict[str, int]:
+    target_downside_t1 = float(price_target_bundle["target_downside_t1"])
+    target_upside_t1 = float(price_target_bundle["target_upside_t1"])
+    next_day_gap_return_t1 = float(price_target_bundle["next_day_gap_return_t1"])
+
+    downside_positive_flag = int(target_downside_t1 > 0.0)
+    downside_large_positive_flag = int(target_downside_t1 > 0.03)
+    upside_extreme_flag = int(target_upside_t1 > 0.10)
+    large_gap_flag = int(abs(next_day_gap_return_t1) > 0.08)
+    suspicious_abnormal_jump_flag = int(
+        (downside_large_positive_flag == 1 and upside_extreme_flag == 1)
+        or large_gap_flag == 1
+    )
+    return {
+        "target_downside_positive_flag_t1": downside_positive_flag,
+        "target_downside_large_positive_flag_t1": downside_large_positive_flag,
+        "target_upside_extreme_flag_t1": upside_extreme_flag,
+        "next_day_large_gap_flag_t1": large_gap_flag,
+        "next_day_suspicious_abnormal_jump_flag_t1": suspicious_abnormal_jump_flag,
+    }
 
 
 def _fillable_quantity(bar_volume: float, replay_config: GridReplayConfig) -> int:
@@ -420,6 +514,125 @@ def _compute_trend_break_risk_label(
     }
 
 
+def _compute_hostile_selloff_risk_label(
+    next_day_bars: pd.DataFrame,
+    today_close: float,
+    grid_step_pct: float,
+    target_tradable_score_t1: int,
+    target_vwap_reversion_t1: int,
+    target_trend_break_risk_t1: int,
+    next_day_trend_direction: int,
+    config: ProjectConfig,
+) -> dict[str, float | int]:
+    label_config = config.strategy_labels
+    anchor_price = max(float(today_close), float(next_day_bars.iloc[0]["open"]))
+    early_bar_limit = max(1, min(int(label_config.hostile_selloff_early_bar_limit), len(next_day_bars)))
+    open30_df = next_day_bars.head(min(30, len(next_day_bars)))
+    open60_df = next_day_bars.head(early_bar_limit)
+    first_open = float(next_day_bars.iloc[0]["open"])
+    last_close = float(next_day_bars.iloc[-1]["close"])
+    open15_return, open15_volume_ratio = _open_window_stats(next_day_bars, bar_count=15)
+
+    open30_low = float(open30_df["low"].min()) if not open30_df.empty else np.nan
+    open60_low = float(open60_df["low"].min()) if not open60_df.empty else np.nan
+    open30_low_return = _safe_return(anchor_price, open30_low)
+    open60_low_return = _safe_return(anchor_price, open60_low)
+
+    low_time_index = int(pd.to_numeric(next_day_bars["low"], errors="coerce").idxmin())
+    low_in_first_hour = low_time_index < early_bar_limit
+    close_vs_anchor_return = _safe_return(anchor_price, last_close)
+    early_drawdown_cash = anchor_price - open60_low if pd.notna(open60_low) else np.nan
+    close_recovery_ratio = (
+        _safe_fraction(last_close - open60_low, early_drawdown_cash)
+        if pd.notna(early_drawdown_cash) and float(early_drawdown_cash) > 0
+        else 1.0
+    )
+
+    vwap_gap = _build_running_vwap_gap(next_day_bars).dropna()
+    negative_vwap_ratio = float((vwap_gap < 0).mean()) if not vwap_gap.empty else 0.0
+    negative_day_return = _safe_return(first_open, last_close)
+    min_drawdown = max(
+        label_config.hostile_selloff_min_drawdown,
+        grid_step_pct * label_config.hostile_selloff_grid_step_multiplier,
+    )
+
+    open30_drawdown_hit = bool(pd.notna(open30_low_return) and open30_low_return <= -min_drawdown)
+    open60_drawdown_hit = bool(pd.notna(open60_low_return) and open60_low_return <= -min_drawdown)
+    weak_recovery = bool(
+        pd.notna(close_recovery_ratio)
+        and close_recovery_ratio <= label_config.hostile_selloff_recovery_ratio_max
+    )
+    weak_close = bool(
+        pd.notna(close_vs_anchor_return)
+        and close_vs_anchor_return <= label_config.hostile_selloff_close_return_max
+    )
+    early_pressure = bool(
+        pd.notna(open15_return)
+        and open15_return <= label_config.hostile_selloff_open15_return_max
+    )
+    opening_volume_shock = bool(
+        pd.notna(open15_volume_ratio)
+        and open15_volume_ratio >= label_config.hostile_selloff_open15_volume_ratio_min
+    )
+    negative_vwap_persistent = negative_vwap_ratio >= label_config.hostile_selloff_negative_vwap_ratio_min
+    negative_trend_break = bool(
+        target_trend_break_risk_t1 == 1 and int(next_day_trend_direction) < 0
+    )
+
+    soft_score = 0
+    soft_score += int(open30_drawdown_hit)
+    soft_score += int(open60_drawdown_hit)
+    soft_score += int(low_in_first_hour)
+    soft_score += int(early_pressure)
+    soft_score += int(opening_volume_shock)
+    soft_score += int(negative_vwap_persistent)
+    soft_score += int(weak_recovery)
+    soft_score += int(weak_close)
+    soft_score += int(target_tradable_score_t1 == 0)
+    soft_score += int(target_vwap_reversion_t1 == 0)
+    soft_score += int(negative_trend_break)
+
+    extreme_signature = bool(
+        open30_drawdown_hit
+        and low_in_first_hour
+        and negative_vwap_persistent
+        and weak_recovery
+        and negative_trend_break
+    )
+    hostile_context = bool(target_tradable_score_t1 == 0 or target_vwap_reversion_t1 == 0)
+    soft_signature = bool(
+        hostile_context
+        and (open30_drawdown_hit or open60_drawdown_hit)
+        and soft_score >= label_config.hostile_selloff_soft_score_min
+        and (early_pressure or weak_close or negative_trend_break)
+    )
+    hostile_selloff_target = bool(extreme_signature or soft_signature)
+
+    return {
+        "target_hostile_selloff_risk_t1": int(hostile_selloff_target),
+        "next_day_open30_low_return": float(open30_low_return) if pd.notna(open30_low_return) else np.nan,
+        "next_day_open60_low_return": float(open60_low_return) if pd.notna(open60_low_return) else np.nan,
+        "next_day_low_time_index": int(low_time_index),
+        "next_day_low_in_first_hour_flag": int(low_in_first_hour),
+        "next_day_close_vs_anchor_return": float(close_vs_anchor_return) if pd.notna(close_vs_anchor_return) else np.nan,
+        "next_day_close_recovery_ratio_from_early_low": (
+            float(close_recovery_ratio) if pd.notna(close_recovery_ratio) else np.nan
+        ),
+        "next_day_negative_vwap_ratio": float(negative_vwap_ratio),
+        "next_day_hostile_selloff_soft_score": int(soft_score),
+        "next_day_hostile_selloff_extreme_t1": int(extreme_signature),
+        "next_day_hostile_selloff_negative_trend_flag": int(negative_trend_break),
+        "next_day_hostile_selloff_hostile_context_flag": int(hostile_context),
+        "next_day_hostile_selloff_open15_return": float(open15_return) if pd.notna(open15_return) else np.nan,
+        "next_day_hostile_selloff_open15_volume_ratio": (
+            float(open15_volume_ratio) if pd.notna(open15_volume_ratio) else np.nan
+        ),
+        "next_day_hostile_selloff_open_close_return": (
+            float(negative_day_return) if pd.notna(negative_day_return) else np.nan
+        ),
+    }
+
+
 def replay_next_day_grid(
     next_day_bars: pd.DataFrame,
     anchor_close: float,
@@ -558,6 +771,23 @@ def build_label_targets(
             next_day_vwap_dominant_side_ratio=float(vwap_reversion_label["next_day_vwap_dominant_side_ratio"]),
             config=config,
         )
+        hostile_selloff_label = _compute_hostile_selloff_risk_label(
+            next_day_bars=next_day_bars,
+            today_close=anchor_close,
+            grid_step_pct=grid_step_pct,
+            target_tradable_score_t1=tradable_score,
+            target_vwap_reversion_t1=int(vwap_reversion_label["target_vwap_reversion_t1"]),
+            target_trend_break_risk_t1=int(trend_break_risk_label["target_trend_break_risk_t1"]),
+            next_day_trend_direction=int(trend_break_risk_label["next_day_trend_direction"]),
+            config=config,
+        )
+        price_target_bundle = _build_price_target_bundle(
+            today_close=anchor_close,
+            next_day_open=float(next_day_row["open"]),
+            next_day_high=float(next_day_row["high"]),
+            next_day_low=float(next_day_row["low"]),
+        )
+        target_anomaly_flags = _build_target_anomaly_flags(price_target_bundle)
 
         rows.append(
             {
@@ -576,13 +806,14 @@ def build_label_targets(
                 "next_day_high": float(next_day_row["high"]),
                 "next_day_low": float(next_day_row["low"]),
                 "next_day_close": float(next_day_row["close"]),
-                "target_upside_t1": float(next_day_row["high"] / anchor_close - 1.0),
-                "target_downside_t1": float(next_day_row["low"] / anchor_close - 1.0),
+                **price_target_bundle,
+                **target_anomaly_flags,
                 "target_grid_pnl_t1": replay_result.target_grid_pnl_t1,
                 "target_positive_grid_day_t1": positive_grid_day,
                 "target_tradable_score_t1": tradable_score,
                 **vwap_reversion_label,
                 **trend_break_risk_label,
+                **hostile_selloff_label,
                 "replay_grid_pnl_cash_t1": replay_result.replay_grid_pnl_cash_t1,
                 "replay_round_trips_t1": replay_result.replay_round_trips_t1,
                 "replay_long_entries_t1": replay_result.replay_long_entries_t1,
@@ -601,6 +832,12 @@ def build_label_targets(
     grid_stats = labels_df["target_grid_pnl_t1"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict()
     upside_stats = labels_df["target_upside_t1"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict()
     downside_stats = labels_df["target_downside_t1"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict()
+    downside_from_open_stats = labels_df["target_downside_from_open_t1"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict()
+    downside_from_max_anchor_stats = labels_df["target_downside_from_max_anchor_t1"].describe(
+        percentiles=[0.1, 0.5, 0.9]
+    ).to_dict()
+    gap_stats = labels_df["next_day_gap_return_t1"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict()
+    target_anomaly_audit = _build_target_anomaly_audit(labels_df)
     audit_payload: dict[str, object] = {
         "source_canonical_path": str(config.canonical_1m_path),
         "source_daily_summary_path": str(config.canonical_1m_daily_summary_path),
@@ -612,9 +849,14 @@ def build_label_targets(
         "tradable_positive_ratio": float(labels_df["target_tradable_score_t1"].mean()),
         "vwap_reversion_positive_ratio": float(labels_df["target_vwap_reversion_t1"].mean()),
         "trend_break_risk_positive_ratio": float(labels_df["target_trend_break_risk_t1"].mean()),
+        "hostile_selloff_risk_positive_ratio": float(labels_df["target_hostile_selloff_risk_t1"].mean()),
         "target_grid_pnl_t1_summary": grid_stats,
         "target_upside_t1_summary": upside_stats,
         "target_downside_t1_summary": downside_stats,
+        "target_downside_from_open_t1_summary": downside_from_open_stats,
+        "target_downside_from_max_anchor_t1_summary": downside_from_max_anchor_stats,
+        "next_day_gap_return_t1_summary": gap_stats,
+        "target_anomaly_audit": target_anomaly_audit,
         "vwap_reversion_event_summary": labels_df["next_day_vwap_reversion_event_count"].describe().to_dict(),
         "vwap_reversion_success_summary": labels_df["next_day_vwap_reversion_success_count"].describe().to_dict(),
         "trend_break_open_close_return_summary": labels_df["next_day_open_close_return"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict(),
@@ -622,6 +864,10 @@ def build_label_targets(
         "trend_break_soft_score_summary": labels_df["next_day_trend_break_soft_score"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict(),
         "trend_break_extreme_positive_ratio": float(labels_df["next_day_trend_break_extreme_t1"].mean()),
         "trend_break_soft_signature_positive_ratio": float(labels_df["next_day_trend_break_soft_signature_t1"].mean()),
+        "hostile_selloff_open30_low_return_summary": labels_df["next_day_open30_low_return"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict(),
+        "hostile_selloff_negative_vwap_ratio_summary": labels_df["next_day_negative_vwap_ratio"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict(),
+        "hostile_selloff_soft_score_summary": labels_df["next_day_hostile_selloff_soft_score"].describe(percentiles=[0.1, 0.5, 0.9]).to_dict(),
+        "hostile_selloff_extreme_positive_ratio": float(labels_df["next_day_hostile_selloff_extreme_t1"].mean()),
         "round_trip_summary": labels_df["replay_round_trips_t1"].describe().to_dict(),
         "forced_close_count": int(labels_df["replay_forced_close_t1"].sum()),
         "ambiguous_entry_count": int(labels_df["replay_ambiguous_entries_t1"].sum()),
@@ -655,6 +901,17 @@ def run_label_engine(config: ProjectConfig = DEFAULT_CONFIG) -> LabelEngineResul
         result.audit_payload["target_grid_pnl_t1_summary"]["mean"],
         result.audit_payload["target_grid_pnl_t1_summary"]["50%"],
         result.audit_payload["target_grid_pnl_t1_summary"]["90%"],
+    )
+    LOGGER.info(
+        "Hostile selloff ratio: %.4f | extreme ratio: %.4f",
+        result.audit_payload["hostile_selloff_risk_positive_ratio"],
+        result.audit_payload["hostile_selloff_extreme_positive_ratio"],
+    )
+    LOGGER.info(
+        "Target anomaly audit: downside_positive_days=%s suspicious_abnormal_jump_days=%s large_gap_days=%s",
+        result.audit_payload["target_anomaly_audit"]["downside_positive_day_count"],
+        result.audit_payload["target_anomaly_audit"]["suspicious_abnormal_jump_day_count"],
+        result.audit_payload["target_anomaly_audit"]["large_gap_day_count"],
     )
     return result
 

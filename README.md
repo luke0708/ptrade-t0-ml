@@ -16,12 +16,14 @@ PTrade 是封闭沙盒，因此当前主线明确**不在盘中运行 XGBoost/Li
 
 - 我在 **Mac** 上接手开发
   - 先看 [docs/cross_machine_dev_guide.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/cross_machine_dev_guide.md)
+  - 日常执行直接看 [docs/mac_daily_weekly_runbook.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/mac_daily_weekly_runbook.md)
   - 优先执行 `bash setup_venv_mac.sh`
+  - 默认把仓库下的 `data/` 当作本地运行目录
   - 如果只是补数或轻量运行，可退回 `setup_vendor_env_mac.sh`
 - 我在 **Windows** 上接手开发
   - 先看 [docs/cross_machine_dev_guide.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/cross_machine_dev_guide.md)
   - 使用本机 `.venv`
-  - 使用 `setup_data_link.ps1` 连接 OneDrive 数据目录
+  - 默认把仓库下的 `data/` 当作本地运行目录
 - 我的目标是 **机器学习算法开发**
   - 不要只装 `requirements.txt`
   - 必须使用完整开发环境，也就是 `requirements-dev.txt`
@@ -39,12 +41,170 @@ python -m unittest discover -s tests
 
 如果上面两步还没通过，说明当前机器还不是完整算法开发环境。
 
+## 运行与归档架构
+
+当前推荐架构如下：
+
+- `data/`
+  - 本地运行目录
+  - 每日补数、foundation、feature、signal 都写到这里
+  - 这是日常生产真源
+- `OneDrive`
+  - 只做备份 / 跨机同步
+  - 不再作为每日运行硬依赖
+  - 如需归档同步，使用环境变量 `PTRADE_ARCHIVE_DATA_DIR` 配合 `python sync_runtime_data_to_archive.py`
+
+如果你当前的 `data/` 还是 OneDrive 软链接，先迁回本地：
+
+```bash
+bash migrate_data_dir_to_local.sh
+```
+
+当前依赖等级：
+
+- `300661_SZ_1m_ptrade.csv`
+  - 硬依赖
+  - 缺失或过期时，禁止导出下一交易日信号
+- `399006.csv`、`512480.csv`
+  - 软依赖
+  - 缺失或过期时允许继续导出，但会强制降级到 `SAFE`
+
+## 每日 / 每周执行清单
+
+这是当前 `300661` 项目的固定操作节奏。核心原则只有 4 条：
+
+1. `1m` 原始数据必须**每天盘后补**
+2. 第二天要用的信号和 PTrade 策略必须**每天盘后导出**
+3. 模型默认**不每天重训**
+4. 只有周末验证通过，才正式接受新的模型版本
+
+### 每日盘后：生产必跑
+
+适用场景：
+
+- 普通交易日收盘后
+- 目标是生成第二天要用的 `ml_daily_signal.json`
+- 目标是生成第二天要复制进 PTrade 的 dated 策略文件
+
+命令：
+
+```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+python daily_backfill_data_mac.py
+python build_minute_foundation.py
+python build_feature_engine.py
+python export_ml_daily_signal.py
+```
+
+这 4 步的含义：
+
+- `daily_backfill_data_mac.py`
+  - 每天补齐原始数据
+  - 尤其是 `300661_SZ_1m_ptrade.csv`，不要隔几天再补
+- `build_minute_foundation.py`
+  - 基于最新分钟数据重建 canonical / summary
+- `build_feature_engine.py`
+  - 基于最新 `t` 日数据生成特征
+- `export_ml_daily_signal.py`
+  - 使用**当前生产模型**
+  - 导出 `t+1` 交易日信号
+  - 同时导出 PTrade 策略脚本
+
+每日跑完后，真正给 PTrade 用的文件是：
+
+- `generated/ptrade/ptrade_300661_latest.py`
+- `generated/ptrade/ptrade_300661_YYYYMMDD.py`
+
+其中：
+
+- `YYYYMMDD` 使用 `signal_for_date`
+- 这个日期表示“下一次实际要运行该策略的交易日”
+- 当前实现会优先按 A 股交易日历顺延，节假日与周末都会顺延；如果交易日历接口失败，才退回“只跳周末”的后备逻辑
+
+### 每周末：训练 / 换模评估
+
+适用场景：
+
+- 周末停盘后
+- 你本周改了标签 / 特征 / controller
+- 你准备评估是否接受新的模型版本
+
+命令：
+
+```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+python build_label_engine.py
+python train_baseline_models.py
+python analyze_walk_forward.py
+python analyze_walk_forward_failures.py
+python export_ml_daily_signal.py
+```
+
+这 5 步的含义：
+
+- `build_label_engine.py`
+  - 用最新真实路径补齐监督标签
+- `train_baseline_models.py`
+  - 训练候选新模型
+- `analyze_walk_forward.py`
+  - 看滚动稳定性
+- `analyze_walk_forward_failures.py`
+  - 看失败窗口和 `NORMAL` 失效模式
+- `export_ml_daily_signal.py`
+  - 如果你接受本次模型，就基于新模型导出下一个交易日信号和 PTrade 策略
+
+### 什么时候只跑旧模型推理
+
+下面这些情况，都只跑“每日盘后 4 步”，不要重训：
+
+- 普通工作日盘后
+- 这周没有改标签 / 特征 / controller
+- 你没有时间做 walk-forward 复盘
+- 你不准备正式接受新模型
+
+一句话：
+
+- **工作日默认只推理**
+- **周末默认才讨论换模**
+
+### 什么时候可以接受新模型
+
+当前阶段，至少满足下面条件，才建议把新模型当作生产模型：
+
+1. `walk_forward_mode_summary.csv` 里，`NORMAL` 没有继续明显差于 `SAFE`
+2. `walk_forward_failure_windows.csv` / `walk_forward_failure_cohort_summary.csv` 没出现新的大幅恶化窗口
+3. 本次改动属于明确版本升级：
+   - 标签升级
+   - 特征升级
+   - controller 升级
+4. 你愿意接受这次训练结果覆盖当前 baseline 目录
+
+### PTrade 模板与生成文件的关系
+
+- `data/ptrade_300661.py`
+  - 视为**模板源文件**
+  - 它可能持续优化
+  - 它也可能来自外部 PTrade 环境的手工拷贝
+- `generated/ptrade/ptrade_300661_YYYYMMDD.py`
+  - 视为**每日实际可复制进 PTrade 的产物**
+
+如果你更新了模板 `data/ptrade_300661.py`，但不需要重新推理，只想把当前已有信号重新渲染成新策略文件，执行：
+
+```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+python export_ptrade_strategy.py
+```
+
 一个面向 `300661` 次日高低点幅度回归任务的本地数据底座项目。当前方案以 `AkShare` 为主，优先使用东方财富相关接口；当部分接口不稳定时，允许切换到 `AkShare` 的新浪后备接口，并在日志与 README 中明确记录限制。
 
-当前目标不是分类，而是为两个回归模型准备训练数据：
+当前目标已经不再是单纯的高低点幅度回归，而是为 `300661` 的离线多头模型准备训练数据：
 
 - `target_upside_t1 = high[t+1] / close[t] - 1`
 - `target_downside_t1 = low[t+1] / close[t] - 1`
+- `target_hostile_selloff_risk_t1`
 
 项目当前同时覆盖：
 
@@ -113,6 +273,13 @@ python -m unittest discover -s tests
 - `analysis/safe_mode_replay_summary.csv`
 - `analysis/downside_error_cases.csv`
 - `analysis/head_feature_importance.csv`
+- `analysis/walk_forward_test_predictions.csv`
+- `analysis/walk_forward_head_metrics.csv`
+- `analysis/walk_forward_window_mode_summary.csv`
+- `analysis/walk_forward_mode_summary.csv`
+- `analysis/walk_forward_failure_windows.csv`
+- `analysis/walk_forward_failure_feature_delta.csv`
+- `analysis/walk_forward_failure_cases.csv`
 
 ## 目录结构
 
@@ -245,22 +412,19 @@ python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pand
 brew install libomp
 ```
 
-4. 连接 OneDrive 数据目录
+4. 可选配置 OneDrive 归档目录
+
+默认不再把 `data/` 软链接到 OneDrive。
+如果你需要把本地运行数据归档到 OneDrive，请配置：
 
 ```bash
-bash setup_data_link_mac.sh
-ls -ld data
-```
-
-如果自动检测失败，可以显式指定 OneDrive 目录：
-
-```bash
-ONEDRIVE_DATA_PATH="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml" bash setup_data_link_mac.sh
+export PTRADE_ARCHIVE_DATA_DIR="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml"
+python sync_runtime_data_to_archive.py
 ```
 
 5. 补回本地数据
 
-由于 `data/` 和 `models/` 默认不进 Git，Mac 端需要你自己补回这些文件，至少包括：
+由于 `data/` 和 `models/` 默认不进 Git，Mac 端需要你自己补回这些文件到本地运行目录 `data/`，至少包括：
 
 - `data/300661_SZ_1m_ptrade.csv`
 - `data/399006.csv`
@@ -332,6 +496,11 @@ cd ~/Developer/ptrade-t0-ml
 python3.12 daily_backfill_data_mac.py
 ```
 
+当前脚本还会在补数完成后做一次“新鲜度校验”：
+
+- 如果今天已经收盘，但 `300661` 的 `1m`、`399006`、`512480` 仍然没有补到最新交易日
+- 脚本会直接以非零退出，不再把旧数据误当作成功补数
+
 如果你使用的是 `vendor/` 模式，运行其他依赖脚本前先执行：
 
 ```bash
@@ -371,6 +540,7 @@ python3.12 build_minute_foundation.py
 - 当前已落地：
   - `target_upside_t1`
   - `target_downside_t1`
+  - `target_hostile_selloff_risk_t1`
   - `target_positive_grid_day_t1`
   - `target_tradable_score_t1`
   - `target_vwap_reversion_t1`
@@ -395,13 +565,14 @@ python3.12 build_minute_foundation.py
 `train_baseline_models.py`
 
 - 将首批特征表与标签表按 `date` 合并成训练集
-- 训练当前“主标的分钟特征 + 环境日线”的 7 个 baseline 头：
+- 训练当前“主标的分钟特征 + 环境日线”的 8 个 baseline 头：
   - `upside_regression`
   - `downside_regression`
   - `grid_pnl_regression`
   - `positive_grid_day_classifier`
   - `tradable_classifier`
   - `trend_break_risk_classifier`
+  - `hostile_selloff_risk_classifier`
   - `vwap_reversion_classifier`
 - 输出训练集、模型文件和元数据评估
 - 模型目录名仍保留为 `baseline_stock_only/`，只是为了兼容旧路径，当前内容已经不再是纯 stock-only slice
@@ -413,6 +584,8 @@ python3.12 build_minute_foundation.py
 - 输出：
   - `data/ml_daily_signal.json`
   - `data/ml_daily_signal.csv`
+  - `generated/ptrade/ptrade_300661_latest.py`
+  - `generated/ptrade/ptrade_300661_YYYYMMDD.py`
 - 当前会同步给出：
   - `pred_upside_t1`
   - `pred_downside_t1`
@@ -420,6 +593,7 @@ python3.12 build_minute_foundation.py
   - `pred_positive_grid_day_t1`
   - `pred_tradable_score_t1`
   - `pred_trend_break_risk_t1`
+  - `pred_hostile_selloff_risk_t1`
   - `pred_vwap_reversion_score_t1`
   - `recommended_mode`
   - `position_scale`
@@ -716,7 +890,16 @@ python export_ml_daily_signal.py
 ```text
 data/ml_daily_signal.json
 data/ml_daily_signal.csv
+generated/ptrade/ptrade_300661_latest.py
+generated/ptrade/ptrade_300661_YYYYMMDD.py
 ```
+
+说明：
+
+- `YYYYMMDD` 使用 `signal_for_date`，也就是下一次实际要拷进 PTrade 的交易日
+- `signal_for_date` 会优先按 A 股交易日历顺延，自动跳过周末与节假日；如果交易日历接口失败，才退回只跳周末的后备逻辑
+- `data/ptrade_300661.py` 作为模板源文件保留
+- 每次执行 `python export_ml_daily_signal.py` 时，会自动把最新 `ML_SIGNAL_PAYLOAD` 渲染进一份新的 PTrade 策略脚本，供你直接复制到 PTrade 平台
 
 当前这一步也已经在本地真实执行过，最新信号样例基于 `2026-04-14` 特征日生成：
 
@@ -794,6 +977,9 @@ data/ml_daily_signal.csv
 - 如果要启用隔夜因子，至少需要补：
   - `data/soxx_daily.csv`
   - `data/nasdaq_daily.csv`
+- 在隔夜源文件补齐之前，下一步推荐先运行：
+  - `python analyze_walk_forward.py`
+  - `python analyze_walk_forward_failures.py`
 - `300661_5m.csv` 如果来自外部免费接口，`amount` 可能为空
 - `300661.csv` 在**当前工作区**里仍是空壳文件，不能继续被误认为可直接使用的日线真值源
 

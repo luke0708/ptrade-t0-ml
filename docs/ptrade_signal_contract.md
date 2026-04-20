@@ -27,13 +27,15 @@ Recommended files:
 - `date`
   feature date `t`
 - `signal_for_date`
-  target trading date `t+1`
+  next actual trading date after `t`
+  should prefer the A-share trading calendar, not just a weekday increment
 - `pred_upside_t1`
 - `pred_downside_t1`
 - `pred_grid_pnl_t1`
 - `pred_positive_grid_day_t1`
 - `pred_tradable_score_t1`
 - `pred_trend_break_risk_t1`
+- `pred_hostile_selloff_risk_t1`
 - `pred_vwap_reversion_score_t1`
 - `recommended_grid_width_t1`
 - `recommended_mode`
@@ -81,6 +83,13 @@ Instead, PTrade should combine it with current position state:
 
 This prevents the model from fully hibernating the strategy for long stretches.
 
+Current controller preference:
+
+- `pred_hostile_selloff_risk_t1` is the primary downside execution blocker
+- `pred_trend_break_risk_t1` is a secondary dampener inside otherwise executable days
+- when `positive_grid` and `tradable` are both on **and** hostile selloff is low, the controller may still allow `NORMAL`
+  even if `trend_break_risk` is elevated
+
 ### Suggested Runtime Controls
 
 The strategy may map ML output to:
@@ -96,10 +105,12 @@ Suggested production priority:
 
 1. `pred_positive_grid_day_t1`
 2. `pred_tradable_score_t1`
-3. `pred_vwap_reversion_score_t1`
-4. `pred_trend_break_risk_t1`
+3. `pred_hostile_selloff_risk_t1`
+4. `pred_vwap_reversion_score_t1`
+5. `pred_trend_break_risk_t1`
 
 `pred_grid_pnl_t1` may still be exported, but it should be treated as an auxiliary diagnostic rather than the primary live gating signal.
+`pred_downside_t1` may still be exported, but it should be treated as a research-only amplitude estimate rather than the primary live downside veto.
 
 ### Level2 Usage Boundary
 
@@ -137,10 +148,13 @@ Recommended daily flow:
 
 1. after market close, ML pipeline builds features and scores day `t`
 2. ML pipeline writes `ml_daily_signal.json`
-3. before `before_trading_start`, PTrade reads the signal file
-4. strategy maps model outputs to mode and risk parameters
-5. intraday strategy executes with ML-adjusted controls and lightweight Level2 hard rules
-6. if needed, intraday execution facts are summarized after the close and fed back into the next offline ML cycle
+3. ML pipeline also renders a dated PTrade strategy file from `data/ptrade_300661.py`, for example:
+   - `generated/ptrade/ptrade_300661_20260421.py`
+   - `generated/ptrade/ptrade_300661_latest.py`
+4. before `before_trading_start`, PTrade uses the rendered dated script or copies it into the live strategy slot
+5. strategy maps model outputs to mode and risk parameters
+6. intraday strategy executes with ML-adjusted controls and lightweight Level2 hard rules
+7. if needed, intraday execution facts are summarized after the close and fed back into the next offline ML cycle
 
 ## Minimal Reader Rule
 

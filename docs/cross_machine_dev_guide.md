@@ -1,6 +1,6 @@
 # 双机协作开发指南：Windows + Mac Mini M4
 
-> 本文档说明如何在 **Windows（主力开发机）** 和 **Mac Mini M4** 之间，通过 **GitHub（代码同步）+ OneDrive（大数据同步）** 实现无缝协作开发，并保持每日数据自动补齐。
+> 本文档说明如何在 **Windows（主力开发机）** 和 **Mac Mini M4** 之间，通过 **GitHub（代码同步）+ OneDrive（归档同步）** 实现无缝协作开发，并保持每日数据自动补齐。
 
 ---
 
@@ -16,7 +16,7 @@
 │  docs/、tests/        │  Git + GitHub                        │
 │  requirements.txt     │  Git + GitHub                        │
 ├──────────────────────┼──────────────────────────────────────┤
-│  data/ 大数据文件     │  OneDrive（网盘自动同步）            │
+│  data/ 本地运行数据   │  本机本地目录                        │
 │  models/ 模型权重     │  OneDrive（网盘自动同步）            │
 │  plots/ 图表产物      │  OneDrive（网盘自动同步）            │
 └──────────────────────┴──────────────────────────────────────┘
@@ -24,8 +24,9 @@
 
 **核心原则**：
 - 代码（轻量）→ GitHub 同步，支持版本控制和回溯
-- 数据（重量，几十 MB 到几 GB）→ OneDrive 同步，避免污染 Git 历史
-- `data/` 目录在两台机器上都是指向 OneDrive 的**软链接（Junction/Symlink）**，代码路径写法完全一致，无需任何修改
+- 运行数据先写本地 `data/`，保证每日生产不依赖网盘同步状态
+- OneDrive 只负责归档 / 跨机复制，避免污染 Git 历史
+- `300661` 的 `1m` 是硬依赖；`399006 / 512480` 日线是软依赖，缺失时信号会降级到 `SAFE`
 
 ### 环境模式约定
 
@@ -47,8 +48,8 @@
 | 项目   | Windows 路径                                  | Mac 路径                                           |
 |--------|-----------------------------------------------|----------------------------------------------------|
 | 代码仓库 | `e:\AI炒股\机器学习\`                          | `~/Developer/ptrade-t0-ml/`（可自定义）            |
-| data 软链接 | `e:\AI炒股\机器学习\data\` → OneDrive     | `~/Developer/ptrade-t0-ml/data/` → OneDrive        |
-| OneDrive 数据实体 | `D:\onedrive\Development\data_bundle\ptrade-t0-ml\` | `~/Library/CloudStorage/OneDrive-*/Development/data_bundle/ptrade-t0-ml/` |
+| 本地运行数据 | `e:\AI炒股\机器学习\data\` | `~/Developer/ptrade-t0-ml/data/` |
+| OneDrive 归档目录 | `D:\onedrive\Development\data_bundle\ptrade-t0-ml\` | `~/Library/CloudStorage/OneDrive-*/Development/data_bundle/ptrade-t0-ml/` |
 
 ---
 
@@ -145,24 +146,23 @@ python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pand
 brew install libomp
 ```
 
-**Step 3**：等待 OneDrive 把 Windows 上传的数据同步完成，然后运行软链接脚本
+**Step 3**：可选配置 OneDrive 归档目录
 
 ```bash
-bash setup_data_link_mac.sh
+export PTRADE_ARCHIVE_DATA_DIR="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml"
 ```
 
-脚本会自动寻找 `~/Library/CloudStorage/OneDrive*` 下的 OneDrive 根目录。
-如果自动检测失败，可以显式传入：
+如果你当前仓库里的 `data/` 仍然是旧的 OneDrive 软链接，先迁回本地运行目录：
 
 ```bash
-ONEDRIVE_DATA_PATH="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml" bash setup_data_link_mac.sh
+bash migrate_data_dir_to_local.sh
 ```
 
-**Step 4**：验证软链接是否生效
+**Step 4**：验证本地运行目录是否生效
 
 ```bash
 ls -la data/
-# 应看到 data -> /Users/xxx/Library/CloudStorage/.../ptrade-t0-ml
+# 应看到 data/ 是本地目录，而不是 OneDrive 软链接
 ```
 
 ---
@@ -204,7 +204,7 @@ source activate_vendor_env.sh
 python3.12 build_minute_foundation.py
 ```
 
-> ✅ 两端都可以独立补数据。OneDrive 会在两端运行后自动同步到另一台机器。
+> ✅ 两端都可以独立补数据。OneDrive 不再是运行硬依赖，只负责后续归档同步。
 
 #### Windows 的 `daily_backfill_data.py` 做了什么？
 
@@ -288,7 +288,7 @@ python -m unittest discover -s tests
 
 收工时：
   4. git add . && git commit && git push  ← 推送代码到 GitHub
-  5. OneDrive 后台自动同步 data/          ← 无需手动操作
+  5. 如需归档，再手动执行 python sync_runtime_data_to_archive.py
 ```
 
 ---

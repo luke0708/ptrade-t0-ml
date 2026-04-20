@@ -4,6 +4,7 @@ import pandas as pd
 
 from ptrade_t0_ml.baseline_models import (
     _select_decision_threshold,
+    build_feature_leakage_audit,
     build_training_dataset,
     get_feature_columns,
     split_train_test,
@@ -61,6 +62,28 @@ class BaselineModelTests(unittest.TestCase):
         feature_columns = get_feature_columns(training_df)
 
         self.assertEqual(feature_columns, ["feature_a", "feature_b"])
+
+    def test_build_feature_leakage_audit_reports_excluded_columns_without_allowing_them_into_features(self) -> None:
+        training_df = pd.DataFrame(
+            {
+                "date": ["2026-04-10"],
+                "feature_a": [1.0],
+                "next_date": ["2026-04-11"],
+                "next_day_open": [10.5],
+                "target_upside_t1": [0.1],
+                "replay_round_trips_t1": [2],
+            }
+        )
+
+        feature_columns = get_feature_columns(training_df)
+        audit = build_feature_leakage_audit(training_df, feature_columns)
+
+        self.assertEqual(feature_columns, ["feature_a"])
+        self.assertTrue(audit["leakage_guard_passed"])
+        self.assertEqual(audit["selected_feature_violations"], [])
+        self.assertIn("next_day_open", audit["excluded_prefixed_columns_present"])
+        self.assertIn("target_upside_t1", audit["excluded_prefixed_columns_present"])
+        self.assertIn("replay_round_trips_t1", audit["excluded_prefixed_columns_present"])
 
     def test_split_train_test_keeps_order(self) -> None:
         df = pd.DataFrame({"date": [f"2026-04-{day:02d}" for day in range(1, 11)]})

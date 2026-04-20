@@ -10,6 +10,23 @@ This document defines the supervised targets for the `300661` ML system. Labels 
 - `target_downside_t1 = next_day_low / today_close - 1`
 
 These are computed from the primary stock path, using next-day realized highs and lows.
+For `300661`, the raw downside regression target now remains primarily a research / comparison target rather than the preferred live downside controller.
+
+## Downside Diagnostic Variants
+
+To diagnose whether the main downside target is being distorted by gap-up days, abnormal jumps, or corporate-action-like discontinuities, the label table also carries research-only downside variants:
+
+- `target_downside_from_open_t1 = next_day_low / next_day_open - 1`
+- `target_downside_from_max_anchor_t1 = next_day_low / max(today_close, next_day_open) - 1`
+- `next_day_gap_return_t1 = next_day_open / today_close - 1`
+
+These are not automatically the production downside head. They exist so we can compare:
+
+- close-anchored downside
+- open-anchored downside
+- gap-adjusted downside
+
+before choosing which definition best reflects real next-day hostile selloff risk for `300661`.
 
 ## Primary Strategy Labels
 
@@ -67,6 +84,38 @@ Deployment note:
 - this label exists to warn the strategy about “mean reversion is likely to fail today”
 - it should remain a soft-constraint / damping signal unless its ranking quality improves materially
 
+### C1. Hostile Selloff Risk
+
+`target_hostile_selloff_risk_t1`
+
+Meaning:
+- whether day `t+1` contains an early hostile selloff pattern that is specifically unfriendly to dip-buy and grid activation
+
+Current production-facing definition:
+- anchor the downside to `max(today_close, next_day_open)` to avoid positive downside artifacts from gap-up days
+- require a sufficiently large early drawdown in the first `30-60` minutes
+- require hostile execution context such as:
+  - weak tradability
+  - missing VWAP reversion
+  - persistent trading below running VWAP
+  - weak close recovery from the early low
+  - or a negative trend-break signature
+
+Diagnostic fields emitted together with this label include:
+
+- `next_day_open30_low_return`
+- `next_day_open60_low_return`
+- `next_day_low_in_first_hour_flag`
+- `next_day_close_vs_anchor_return`
+- `next_day_close_recovery_ratio_from_early_low`
+- `next_day_negative_vwap_ratio`
+- `next_day_hostile_selloff_soft_score`
+- `next_day_hostile_selloff_extreme_t1`
+
+Deployment note:
+- this is the preferred production-facing downside risk head for `300661`
+- `target_downside_t1` should remain exported for research, ranking comparison, and post-mortem diagnostics
+
 ### D. Grid PnL
 
 `target_grid_pnl_t1`
@@ -119,6 +168,20 @@ Any residual temporary position must be flattened using the same pessimistic fil
 - No label may use information from day `t+1` to build day `t` features.
 - Replay logic must use only bar-level information available at each replay step.
 - If OHLC ambiguity remains, choose the less favorable path.
+
+## Required Label Audit
+
+Every label build should explicitly audit abnormal next-day price jumps, especially for downside targets.
+
+At minimum, the audit should report:
+
+- days where `target_downside_t1 > 0`
+- days where `target_downside_t1` is strongly positive
+- days where `target_upside_t1` is abnormally large
+- large next-day gap days
+- sample dates that look suspicious enough to review manually
+
+This is important because these days can weaken downside ranking quality without being a classic feature-leakage bug.
 
 ## How This Guides ML
 

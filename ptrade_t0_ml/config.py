@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+import os
 from pathlib import Path
 
 
@@ -61,6 +62,7 @@ class MinuteFeatureConfig:
     large_drawdown_threshold: float = 0.02
     strong_tail_close_threshold: float = 0.01
     strong_afternoon_reversal_threshold: float = 0.01
+    relative_weakness_threshold: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -94,11 +96,22 @@ class StrategyLabelConfig:
     trend_break_label_vwap_side_ratio_min: float = 0.84
     trend_break_label_max_vwap_cross_count: int = 6
     trend_break_label_soft_score_min: int = 8
+    hostile_selloff_min_drawdown: float = 0.015
+    hostile_selloff_grid_step_multiplier: float = 1.40
+    hostile_selloff_open15_return_max: float = -0.006
+    hostile_selloff_open15_volume_ratio_min: float = 0.08
+    hostile_selloff_negative_vwap_ratio_min: float = 0.68
+    hostile_selloff_close_return_max: float = -0.008
+    hostile_selloff_recovery_ratio_max: float = 0.55
+    hostile_selloff_soft_score_min: int = 6
+    hostile_selloff_early_bar_limit: int = 60
 
 
 @dataclass(frozen=True)
 class ProjectConfig:
     base_dir: Path
+    runtime_data_dir: Path | None = None
+    archive_data_dir: Path | None = None
     stock_symbol: str = "300661"
     stock_exchange: str = "SZ"
     start_date: str = "2020-01-01"
@@ -119,7 +132,11 @@ class ProjectConfig:
 
     @property
     def data_dir(self) -> Path:
-        return self.base_dir / "data"
+        return self.runtime_data_dir or (self.base_dir / "data")
+
+    @property
+    def backup_archive_data_dir(self) -> Path | None:
+        return self.archive_data_dir
 
     @property
     def models_dir(self) -> Path:
@@ -194,12 +211,64 @@ class ProjectConfig:
         return self.analysis_dir / "safe_mode_replay_summary.csv"
 
     @property
+    def controller_interaction_summary_path(self) -> Path:
+        return self.analysis_dir / "controller_interaction_summary.csv"
+
+    @property
     def downside_error_cases_path(self) -> Path:
         return self.analysis_dir / "downside_error_cases.csv"
 
     @property
     def head_feature_importance_path(self) -> Path:
         return self.analysis_dir / "head_feature_importance.csv"
+
+    @property
+    def downside_target_comparison_path(self) -> Path:
+        return self.analysis_dir / "downside_target_comparison.csv"
+
+    @property
+    def downside_target_predictions_path(self) -> Path:
+        return self.analysis_dir / "downside_target_predictions.csv"
+
+    @property
+    def walk_forward_test_predictions_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_test_predictions.csv"
+
+    @property
+    def walk_forward_head_metrics_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_head_metrics.csv"
+
+    @property
+    def walk_forward_window_mode_summary_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_window_mode_summary.csv"
+
+    @property
+    def walk_forward_mode_summary_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_mode_summary.csv"
+
+    @property
+    def walk_forward_controller_interaction_summary_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_controller_interaction_summary.csv"
+
+    @property
+    def walk_forward_failure_windows_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_failure_windows.csv"
+
+    @property
+    def walk_forward_failure_cohort_summary_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_failure_cohort_summary.csv"
+
+    @property
+    def walk_forward_failure_feature_delta_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_failure_feature_delta.csv"
+
+    @property
+    def walk_forward_failure_threshold_drift_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_failure_threshold_drift.csv"
+
+    @property
+    def walk_forward_failure_cases_path(self) -> Path:
+        return self.analysis_dir / "walk_forward_failure_cases.csv"
 
     @property
     def overnight_factors_path(self) -> Path:
@@ -258,9 +327,42 @@ class ProjectConfig:
         return self.data_dir / "ml_daily_signal.json"
 
     @property
+    def generated_dir(self) -> Path:
+        return self.base_dir / "generated"
+
+    @property
+    def ptrade_strategy_template_path(self) -> Path:
+        return self.data_dir / f"ptrade_{self.stock_symbol}.py"
+
+    @property
+    def ptrade_strategy_output_dir(self) -> Path:
+        return self.generated_dir / "ptrade"
+
+    @property
+    def ptrade_strategy_latest_path(self) -> Path:
+        return self.ptrade_strategy_output_dir / f"ptrade_{self.stock_symbol}_latest.py"
+
+    def ptrade_strategy_dated_path(self, signal_for_date: str) -> Path:
+        compact_date = signal_for_date.replace("-", "")
+        return self.ptrade_strategy_output_dir / f"ptrade_{self.stock_symbol}_{compact_date}.py"
+
+    @property
     def today_str(self) -> str:
         return date.today().isoformat()
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG = ProjectConfig(base_dir=BASE_DIR)
+
+
+def _resolve_optional_path(env_name: str) -> Path | None:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return None
+    return Path(raw_value).expanduser()
+
+
+DEFAULT_CONFIG = ProjectConfig(
+    base_dir=BASE_DIR,
+    runtime_data_dir=_resolve_optional_path("PTRADE_RUNTIME_DATA_DIR"),
+    archive_data_dir=_resolve_optional_path("PTRADE_ARCHIVE_DATA_DIR"),
+)

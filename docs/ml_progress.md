@@ -257,7 +257,11 @@ Completed first-slice outputs:
 - [train_baseline_models.py](</E:/AI炒股/机器学习/train_baseline_models.py>)
 - [baseline_models.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_models.py>)
 - [analyze_baseline_quality.py](</E:/AI炒股/机器学习/analyze_baseline_quality.py>)
+- [analyze_walk_forward.py](</E:/AI炒股/机器学习/analyze_walk_forward.py>)
+- [analyze_downside_targets.py](</E:/AI炒股/机器学习/analyze_downside_targets.py>)
 - [baseline_quality.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_quality.py>)
+- [walk_forward_analysis.py](</E:/AI炒股/机器学习/ptrade_t0_ml/walk_forward_analysis.py>)
+- [downside_target_analysis.py](</E:/AI炒股/机器学习/ptrade_t0_ml/downside_target_analysis.py>)
 - [300661_SZ_training_dataset.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_training_dataset.csv>)
 - [baseline_stock_only_metadata.json](</E:/AI炒股/机器学习/models/baseline_stock_only/baseline_stock_only_metadata.json>)
 - baseline model files under [baseline_stock_only](</E:/AI炒股/机器学习/models/baseline_stock_only>)
@@ -335,6 +339,54 @@ Validated facts from the first baseline quality analysis pass:
   - `stk_m_realized_volatility`
   - recent volatility / large-vwap-deviation rolling features
 - this suggests the current downside head is leaning more on medium-horizon volatility regime context than on a sharp next-day hostile selloff signature
+
+Validated facts from the downside target audit:
+
+- current close-anchored `target_downside_t1` has `158` positive days (`7.34%`)
+- `target_downside_t1 > 3%` occurs on `14` days
+- `target_upside_t1 > 10%` occurs on `80` days
+- large next-day gap days currently count `10`
+- suspicious abnormal-jump days currently count `12`
+- many suspicious days are concentrated around:
+  - early post-listing limit-up style sequences
+  - holiday / reopening gaps
+  - abrupt large upward discontinuities
+- the current training-frame leakage audit now explicitly records:
+  - excluded reference columns present in the merged frame
+  - excluded `next_day_ / target_ / replay_` columns present in the merged frame
+  - zero selected feature violations
+  - `leakage_guard_passed = true`
+
+First in-memory downside target comparison:
+
+- `target_downside_t1`
+  - positive ratio: `9.51%`
+  - test spearman: `-0.0109`
+- `target_downside_from_open_t1`
+  - positive ratio: `0.00%`
+  - test spearman: `-0.0791`
+- `target_downside_from_max_anchor_t1`
+  - positive ratio: `0.00%`
+  - test spearman: `-0.0050`
+
+First in-memory abnormal-jump filtering check on the current test slice:
+
+- only `4` suspicious abnormal-jump rows fall inside the current test window
+- filtering those rows does **not** materially improve downside ranking:
+  - `target_downside_t1`: `-0.0109 -> -0.0135`
+  - `target_downside_from_open_t1`: `-0.0791 -> -0.0783`
+  - `target_downside_from_max_anchor_t1`: `-0.0050 -> -0.0101`
+
+Interpretation:
+
+- simply switching to `next_day_open` anchor does remove positive downside days
+- but the first rerun does **not** automatically improve ranking quality
+- simply filtering suspicious jump rows inside the current test slice also does **not** solve the ranking problem
+- this means the next downside repair step should treat:
+  - target definition
+  - abnormal-event filtering
+  - and feature alignment
+as a combined diagnosis problem rather than assuming one anchor change will solve it
 
 Interpretation:
 
@@ -439,11 +491,346 @@ Mitigation:
 
 ## Immediate Next Steps
 
-1. Read `analysis/safe_mode_replay_summary.csv` and confirm whether `SAFE` days are truly worse enough to justify live gating
-2. Read `analysis/downside_error_cases.csv` and inspect why the worst `downside` misses include multiple positive next-day downside values
-3. Use `analysis/head_feature_importance.csv` to check whether `downside_regression` is overweighting slow regime features versus next-day hostile selloff precursors
-4. Keep `grid_pnl_regression` as a research head and let `positive_grid_day_classifier` remain the main production gate
-5. Only after the baseline quality diagnosis is understood, decide whether the next gain should come from overnight factors, label redesign, or Level2-derived post-close summary features
+1. Run `analyze_walk_forward.py` and read:
+   - `analysis/walk_forward_mode_summary.csv`
+   - `analysis/walk_forward_window_mode_summary.csv`
+   - `analysis/walk_forward_head_metrics.csv`
+2. Confirm whether the refactored `NORMAL` slice still keeps a materially cleaner left tail across rolling windows, not just the single latest holdout split
+3. If overnight factors are still desired, first provide:
+   - `data/soxx_daily.csv`
+   - `data/nasdaq_daily.csv`
+4. Only after walk-forward quality is understood, decide whether the next gain should come from overnight context, abnormal-event filtering, or Level2-derived post-close summary features
+
+## Latest Update: Hostile Selloff Risk Head
+
+Implemented a new production-facing downside risk label and head:
+
+- `target_hostile_selloff_risk_t1`
+- `hostile_selloff_risk_classifier`
+- `pred_hostile_selloff_risk_t1`
+
+Current definition summary:
+
+- anchor downside to `max(today_close, next_day_open)`
+- focus on the first `30-60` minutes instead of raw full-day low only
+- require an early hostile drawdown signature plus hostile execution context:
+  - weak tradability
+  - failed VWAP reversion
+  - persistent trading below running VWAP
+  - weak close recovery from the early low
+  - or negative trend-break confirmation
+
+New label diagnostics now emitted by `label_engine.py`:
+
+- `next_day_open30_low_return`
+- `next_day_open60_low_return`
+- `next_day_low_in_first_hour_flag`
+- `next_day_close_vs_anchor_return`
+- `next_day_close_recovery_ratio_from_early_low`
+- `next_day_negative_vwap_ratio`
+- `next_day_hostile_selloff_soft_score`
+- `next_day_hostile_selloff_extreme_t1`
+
+Validated facts from the first real-data in-memory check:
+
+- total rows: `2153`
+- `target_hostile_selloff_risk_t1` positive ratio: `17.56%`
+- `next_day_hostile_selloff_extreme_t1` positive ratio: `0.14%`
+- current test-slice positive ratio: `17.87%`
+- first baseline classifier pass:
+  - average precision: `0.2231`
+  - ROC AUC: `0.6048`
+  - default threshold `0.50` recall: `0.1429`
+  - calibrated threshold `0.25` recall: `0.5065`
+
+Interpretation:
+
+- this looks materially more aligned with the real `300661` strategy problem than the current raw `downside_regression`
+- the head is not yet a strong standalone alpha source, but it is already usable as a production-side dip-buy / mode-damping signal
+- `pred_downside_t1` should remain exported for diagnostics, while `pred_hostile_selloff_risk_t1` becomes the preferred live downside controller
+
+Latest controller interaction summary:
+
+- added [controller_interaction_summary.csv](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analysis/controller_interaction_summary.csv)
+- key combined segments on the current test slice:
+  - `pg_tr_on_hs_on`: `45` rows, `grid_pnl_mean = -0.008786`, `p10 = -0.036325`, worst day `-0.187665`
+  - `pg_tr_on_hs_off`: `38` rows, `grid_pnl_mean = -0.000205`, `p10 = -0.012609`, worst day `-0.026786`
+  - `trend_low_hs_high`: `165` rows, `grid_pnl_mean = -0.009072`
+  - `vwap_on_hs_on`: `75` rows, `grid_pnl_mean = -0.013971`
+  - `vwap_on_hs_off`: `110` rows, `grid_pnl_mean = -0.002340`
+
+Interpretation:
+
+- hostile selloff high-risk days materially worsen left-tail outcomes even when `positive_grid` and `tradable` are both on
+- this means `hostile_selloff` should stay as a real production dampener
+- the next tuning step should not weaken this head; it should refine how PTrade maps this signal into:
+  - dip-buy veto
+  - position scaling
+  - grid-width widening
+
+Latest signal-controller refactor:
+
+- rewrote the daily controller in [signal_export.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/signal_export.py) around explicit states:
+  - `core_edge = positive_grid_on and tradable_on`
+  - `clean_edge = core_edge and not hostile_selloff_high`
+  - `reversion_edge = clean_edge and vwap_on`
+- `trend_break_risk` is no longer treated as an automatic `SAFE` veto
+- `hostile_selloff` remains the primary downside execution blocker
+- branch rationales are now explicit:
+  - `clean_edge_without_hostile_selloff`
+  - `clean_edge_with_trend_damper`
+  - `hostile_selloff_blocks_execution`
+  - `positive_grid_without_tradable_confirmation`
+  - `tradable_without_grid_confirmation`
+  - `negative_stack_with_hostile_selloff`
+
+Validated facts after rerunning `analyze_baseline_quality.py` with the refactored controller:
+
+- mode distribution:
+  - `SAFE = 388`
+  - `NORMAL = 38`
+  - `OFF = 5`
+  - `AGGRESSIVE = 0`
+- updated segment quality:
+  - `NORMAL` replay mean: `-0.000205`
+  - `NORMAL` p10: `-0.012609`
+  - `SAFE` replay mean: `-0.006657`
+  - `SAFE` p10: `-0.032002`
+- current `NORMAL` now maps almost exactly to `pg_tr_on_hs_off`, which is the cleanest executable slice seen so far
+
+Interpretation:
+
+- the controller is now closer to the real empirical split implied by the test slice
+- `trend_break_risk` should stay a dampener inside `NORMAL`, not a top-level veto
+- the next ML-side gain is more likely to come from better features / context for `positive_grid`, `tradable`, and `hostile_selloff` than from further controller reshuffling alone
+
+Latest walk-forward evaluation tooling:
+
+- added [analyze_walk_forward.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analyze_walk_forward.py)
+- added [walk_forward_analysis.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/walk_forward_analysis.py)
+- rolling defaults:
+  - train window: `756` rows
+  - test window: `63` rows
+  - step: `63` rows
+- exported analysis files:
+  - `analysis/walk_forward_test_predictions.csv`
+  - `analysis/walk_forward_head_metrics.csv`
+  - `analysis/walk_forward_window_mode_summary.csv`
+  - `analysis/walk_forward_mode_summary.csv`
+  - `analysis/walk_forward_controller_interaction_summary.csv`
+- purpose:
+  - validate whether `SAFE/NORMAL/OFF` separation survives rolling windows
+  - validate whether `hostile_selloff` remains a stable left-tail blocker outside one fixed holdout slice
+  - keep ML optimization moving even when `overnight_factors.csv` is blocked by missing raw source files
+
+Validated facts after the first real-data `walk-forward` run:
+
+- default window setup:
+  - train window: `756` rows
+  - test window: `63` rows
+  - step: `63` rows
+- total walk-forward windows: `22`
+- prediction coverage: `2020-07-13` to `2026-03-31`
+- total evaluated days: `1386`
+- mode distribution across all rolling windows:
+  - `SAFE = 1045`
+  - `NORMAL = 312`
+  - `AGGRESSIVE = 27`
+  - `OFF = 2`
+- overall mode summary:
+  - `SAFE` replay mean: `-0.003926`
+  - `NORMAL` replay mean: `-0.004249`
+  - `AGGRESSIVE` replay mean: `-0.004979`
+  - `SAFE` p10: `-0.030402`
+  - `NORMAL` p10: `-0.029410`
+- per-window comparison:
+  - windows with both `SAFE` and `NORMAL`: `22`
+  - `NORMAL` beat `SAFE` on replay mean in only `12 / 22` windows
+- rolling head metric means:
+  - `hostile_selloff_risk_classifier` average precision: `0.3112`
+  - `hostile_selloff_risk_classifier` ROC AUC: `0.5992`
+  - `positive_grid_day_classifier` average precision: `0.4580`
+  - `tradable_classifier` average precision: `0.3911`
+  - `vwap_reversion_classifier` average precision: `0.3736`
+  - `downside_regression` spearman rank corr: `0.0487`
+  - `grid_pnl_regression` spearman rank corr: `0.0023`
+  - `upside_regression` spearman rank corr: `0.0052`
+
+Interpretation:
+
+- the controller refactor improved explainability, but the single latest holdout split overstated its stability
+- `NORMAL` is not yet a robust rolling-window executable slice
+- `hostile_selloff` remains the most stable downside-oriented classification head, but it is not sufficient by itself to create clean strategy-level separation
+- the next ML gain should come from better context features or label refinement, not more controller-only reshuffling
+
+Latest walk-forward failure diagnosis:
+
+- added [analyze_walk_forward_failures.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analyze_walk_forward_failures.py)
+- added [walk_forward_failure_analysis.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/walk_forward_failure_analysis.py)
+- exported analysis files:
+  - `analysis/walk_forward_failure_windows.csv`
+  - `analysis/walk_forward_failure_cohort_summary.csv`
+  - `analysis/walk_forward_failure_feature_delta.csv`
+  - `analysis/walk_forward_failure_threshold_drift.csv`
+  - `analysis/walk_forward_failure_cases.csv`
+
+Validated facts from the first real-data failure pass:
+
+- losing windows where `NORMAL <= SAFE`: `10`
+- winning windows where `NORMAL > SAFE`: `12`
+- worst failure windows:
+  - window `17`: `2024-09-03 -> 2024-12-09`, `SAFE = -0.005210`, `NORMAL = -0.050938`
+  - window `13`: `2023-08-21 -> 2023-11-23`, `SAFE = 0.000483`, `NORMAL = -0.008793`
+  - window `9`: `2022-08-08 -> 2022-11-10`, `SAFE = -0.000902`, `NORMAL = -0.006013`
+- cohort comparison for `NORMAL` days:
+  - failure windows:
+    - `grid_pnl_mean = -0.007872`
+    - `target_positive_grid_day_rate = 0.3129`
+    - `target_tradable_rate = 0.2393`
+    - `pred_positive_grid_day_mean = 0.4922`
+    - `pred_tradable_mean = 0.4372`
+  - good windows:
+    - `grid_pnl_mean = -0.000285`
+    - `target_positive_grid_day_rate = 0.4430`
+    - `target_tradable_rate = 0.3289`
+    - `pred_positive_grid_day_mean = 0.4969`
+    - `pred_tradable_mean = 0.4155`
+- largest negative feature deltas on failure `NORMAL` days:
+  - `next_day_close_recovery_ratio_from_early_low`
+  - `target_positive_grid_day_t1`
+  - `pred_vwap_reversion_score_t1`
+  - `target_tradable_score_t1`
+  - `target_vwap_reversion_t1`
+- threshold drift:
+  - failure windows use lower mean thresholds on:
+    - `hostile_selloff_risk_classifier`
+    - `positive_grid_day_classifier`
+    - `vwap_reversion_classifier`
+  - `vwap_reversion_classifier` AP is materially weaker in failure windows (`0.3100` vs `0.4266`)
+- worst failure cases are still mostly tagged as `clean_edge_without_hostile_selloff`, but many of them realize:
+  - `target_positive_grid_day_t1 = 0`
+  - `target_tradable_score_t1 = 0`
+  - sharp early drawdown or poor early-low recovery
+
+Interpretation:
+
+- the main failure mode is not “hostile risk was obviously high but missed”; it is “the stack overestimated clean reversion/tradability when the day later proved non-tradable”
+- this points more strongly to missing regime/context features than to controller mapping defects
+- the next feature priority should bias toward:
+  - overnight gap / external risk context
+  - early hostile selloff precursors
+  - VWAP reversion failure regime context
+
+Latest feature-engine extension for failure-regime context:
+
+- extended [feature_engine.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/feature_engine.py) with new same-day regime features:
+  - `stk_m_open30_low_return`
+  - `stk_m_open60_low_return`
+  - `stk_m_low_in_first_hour_flag`
+  - `stk_m_close_recovery_ratio_from_open60_low`
+  - `stk_m_open30_negative_vwap_ratio`
+  - `stk_m_open60_negative_vwap_ratio`
+  - `stk_m_open30_vwap_cross_count`
+  - `stk_m_open60_vwap_cross_count`
+  - `stk_m_open30_vwap_dominant_side_ratio`
+  - `stk_m_open60_vwap_dominant_side_ratio`
+  - `stk_m_hostile_selloff_soft_score`
+- added regime flags and rolling rates:
+  - `flag_open60_deep_selloff`
+  - `flag_open60_negative_vwap_persistent`
+  - `flag_open60_poor_recovery`
+  - `flag_hostile_selloff_regime`
+  - `flag_reversion_failure_regime`
+
+Validated facts from the real-data in-memory feature build:
+
+- row count: `2154`
+- column count after the new regime block: `315`
+- new feature summaries:
+  - `stk_m_open60_low_return` mean: `-0.0161`
+  - `stk_m_open60_negative_vwap_ratio` mean: `0.5012`
+  - `stk_m_open60_vwap_cross_count` mean: `5.86`
+  - `stk_m_hostile_selloff_soft_score` mean: `3.06`
+  - `flag_hostile_selloff_regime` positive ratio: `8.82%`
+  - `flag_reversion_failure_regime` positive ratio: `17.41%`
+
+Interpretation:
+
+- this adds the exact kind of context the failure diagnosis was missing: early drawdown depth, early VWAP pressure, early-path choppiness, and same-day close recovery quality
+- the next required step is not more feature design discussion; it is to rebuild the on-disk feature table and rerun baseline plus walk-forward with this new block
+
+Latest feature-engine extension for relative environment regime:
+
+- extended [feature_engine.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/feature_engine.py) with:
+  - `stk_idx_return_spread`
+  - `stk_sec_return_spread`
+  - `stk_idx_gap_spread`
+  - `stk_sec_gap_spread`
+  - `stk_idx_close_to_ma20_spread`
+  - `stk_sec_close_to_ma20_spread`
+  - `idx_sec_return_spread`
+  - `flag_relative_weak_vs_idx`
+  - `flag_relative_weak_vs_sec`
+  - `flag_gap_up_without_index_confirmation`
+  - `flag_gap_up_without_sector_confirmation`
+- the rolling feature block was also rewritten to append columns via `pd.concat`, so the old pandas fragmentation warning no longer reproduces in the in-memory real-data build
+
+Validated facts from the real-data in-memory build after this change:
+
+- row count: `2154`
+- column count after relative-environment extension: `382`
+- new feature summaries:
+  - `stk_idx_return_spread` mean: `0.0016`
+  - `stk_sec_return_spread` mean: `-0.0139`
+  - `stk_idx_close_to_ma20_spread` mean: `0.0104`
+  - `stk_sec_close_to_ma20_spread` mean: `0.0043`
+  - `flag_relative_weak_vs_idx` positive ratio: `20.71%`
+  - `flag_relative_weak_vs_sec` positive ratio: `14.16%`
+  - `flag_gap_up_without_sector_confirmation_rate_5d` mean: `0.1275`
+
+Interpretation:
+
+- the failure diagnostics pointed to weaker `daily_return / sec_daily_return / atr_pct` on bad `NORMAL` windows, so relative-environment context is a more justified next addition than more path-only microstructure features
+- the next execution step is to rebuild the on-disk feature table again and rerun `baseline + walk-forward + failure analysis` on top of this `382`-column slice
+
+Validated facts after the first real rerun on the `382`-column slice:
+
+- on-disk feature table:
+  - rows: `2154`
+  - columns: `382`
+  - label matches: `2153`
+- baseline holdout metrics:
+  - `downside_regression` spearman: `0.0780`
+  - `grid_pnl_regression` spearman: `-0.0099`
+  - `positive_grid_day_classifier` AP: `0.4151`
+  - `tradable_classifier` AP: `0.3463`
+  - `hostile_selloff_risk_classifier` AP: `0.2484`
+  - `vwap_reversion_classifier` AP: `0.3597`
+- walk-forward rolling means:
+  - `downside_regression` spearman: `0.0907`
+  - `positive_grid_day_classifier` AP: `0.4726`
+  - `tradable_classifier` AP: `0.3782`
+  - `hostile_selloff_risk_classifier` AP: `0.3121`
+  - `vwap_reversion_classifier` AP: `0.3781`
+- walk-forward mode summary:
+  - `SAFE` mean: `-0.004003`
+  - `NORMAL` mean: `-0.004191`
+  - `AGGRESSIVE` mean: `-0.000951`
+  - losing windows where `NORMAL <= SAFE`: `11`
+  - winning windows where `NORMAL > SAFE`: `11`
+
+Updated interpretation:
+
+- the new relative-environment block improved several heads, especially:
+  - `downside_regression`
+  - `positive_grid_day_classifier`
+  - `vwap_reversion_classifier`
+- but the main controller problem remains:
+  - `NORMAL` still does not stably beat `SAFE` across rolling windows
+- this means the next gain is more likely to come from:
+  - target/decision redesign for `NORMAL`
+  - or richer context features that explain failed tradability/reversion
+  - not from continuing to widen the same feature family without changing the downstream decision logic
 
 ## Coordination Rule
 
@@ -454,3 +841,85 @@ If ML work and PTrade work continue in separate chats, both sides must treat:
 - `data/ml_daily_signal.json`
 
 as the only shared communication layer.
+
+## PTrade Daily Render Integration
+
+Added a dedicated PTrade strategy rendering layer so the daily production chain no longer stops at `ml_daily_signal.json`.
+
+Code changes:
+
+- added [ptrade_strategy_export.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/ptrade_strategy_export.py)
+- added [export_ptrade_strategy.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/export_ptrade_strategy.py)
+- extended [config.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/config.py) with:
+  - `ptrade_strategy_template_path`
+  - `ptrade_strategy_output_dir`
+  - `ptrade_strategy_latest_path`
+  - `ptrade_strategy_dated_path(signal_for_date)`
+- extended [signal_export.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/signal_export.py) so `python export_ml_daily_signal.py` now also writes a dated PTrade script
+
+Operational contract:
+
+- template source remains:
+  - `data/ptrade_300661.py`
+- daily generated local artifacts now include:
+  - `generated/ptrade/ptrade_300661_latest.py`
+  - `generated/ptrade/ptrade_300661_YYYYMMDD.py`
+- `YYYYMMDD` uses `signal_for_date`, so the filename itself tells which trading day the script is for
+
+Reasoning:
+
+- the user wants a directly copyable PTrade script each day, not just `ml_daily_signal.json`
+- keeping the template separate from dated rendered outputs avoids daily manual payload replacement
+- writing generated scripts under local `generated/` avoids coupling daily operational artifacts to the `data/` symlink target
+
+## Daily / Weekly Runbook Clarification
+
+The operating cadence has now been made explicit in project docs:
+
+- [README.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/README.md)
+- [Project Plan.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/Project%20Plan.md)
+- [mac_daily_weekly_runbook.md](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/mac_daily_weekly_runbook.md)
+
+Confirmed operating rules:
+
+- `1m` raw data is daily-critical and should be backfilled after every close
+- daily production flow is:
+  - `daily_backfill_data_mac.py`
+  - `build_minute_foundation.py`
+  - `build_feature_engine.py`
+  - `export_ml_daily_signal.py`
+- weekly training / model acceptance flow is:
+  - `build_label_engine.py`
+  - `train_baseline_models.py`
+  - `analyze_walk_forward.py`
+  - `analyze_walk_forward_failures.py`
+  - `export_ml_daily_signal.py`
+- `data/ptrade_300661.py` is now treated as a template source that may continue to evolve and may be copied back from external PTrade
+- `generated/ptrade/ptrade_300661_YYYYMMDD.py` is the operational artifact actually copied into PTrade
+
+Signal-date improvement:
+
+- `signal_for_date` is no longer documented as a simple “next weekday” concept
+- the export path now prefers the A-share trading calendar and only falls back to the weekend-only rule if calendar lookup fails
+- this keeps both:
+  - `ml_daily_signal.json`
+  - `ptrade_300661_YYYYMMDD.py`
+aligned with the next actual trading day across holiday gaps
+
+## Mac Backfill Freshness Guard
+
+Updated [daily_backfill_data_mac.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/daily_backfill_data_mac.py) so the script no longer treats “fetched nothing new” as silent success.
+
+Current behavior:
+
+- after updating:
+  - `300661_SZ_1m_ptrade.csv`
+  - `399006.csv`
+  - `512480.csv`
+- the script now checks whether these files have reached the expected latest trading date
+- if the local time is already after market close but the files are still stale, the script exits non-zero
+
+Purpose:
+
+- prevent the downstream chain from exporting a next-day signal off stale inputs
+- make “daily inference correctness” observable from the backfill stage instead of only noticing it at `export_ml_daily_signal.py`

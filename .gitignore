@@ -18,6 +18,7 @@ tmp*
 
 /data
 /analysis
+/generated
 
 # 临时文件
 data/tmp*

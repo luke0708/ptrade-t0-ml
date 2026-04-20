@@ -172,6 +172,59 @@ def _volume_profile_stats(day_df: pd.DataFrame, config: MinuteFeatureConfig) -> 
     return _weighted_skew_kurt(np.asarray(centers), np.asarray(weights))
 
 
+def _build_running_vwap_gap(frame: pd.DataFrame) -> pd.Series:
+    close_series = pd.to_numeric(frame["close"], errors="coerce")
+    volume_series = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+    cumulative_volume = volume_series.cumsum()
+    price_volume = close_series * volume_series
+    running_vwap = price_volume.cumsum().where(cumulative_volume > 0, np.nan) / cumulative_volume.where(
+        cumulative_volume > 0,
+        np.nan,
+    )
+    gap_series = close_series / running_vwap - 1.0
+    return gap_series.replace([np.inf, -np.inf], np.nan)
+
+
+def _count_vwap_crosses(valid_gap: pd.Series) -> int:
+    if valid_gap.empty:
+        return 0
+    sign_series = np.sign(valid_gap)
+    sign_changes = (
+        (sign_series != sign_series.shift(1))
+        & (sign_series != 0)
+        & (sign_series.shift(1) != 0)
+    ).sum()
+    return int(sign_changes)
+
+
+def _window_vwap_regime_stats(day_df: pd.DataFrame, count: int, anchor_price: float) -> dict[str, float]:
+    window_df = _segment_frame(day_df, count, mode="head")
+    result = {
+        f"stk_m_open{count}_low_return": np.nan,
+        f"stk_m_open{count}_negative_vwap_ratio": np.nan,
+        f"stk_m_open{count}_vwap_cross_count": 0.0,
+        f"stk_m_open{count}_vwap_dominant_side_ratio": np.nan,
+    }
+    if window_df.empty:
+        return result
+
+    window_low = float(window_df["low"].min())
+    vwap_gap = _build_running_vwap_gap(window_df).dropna()
+    negative_vwap_ratio = float((vwap_gap < 0).mean()) if not vwap_gap.empty else np.nan
+    dominant_side_ratio = (
+        float(max((vwap_gap > 0).mean(), (vwap_gap < 0).mean())) if not vwap_gap.empty else np.nan
+    )
+    result.update(
+        {
+            f"stk_m_open{count}_low_return": _return_from_open(anchor_price, window_low),
+            f"stk_m_open{count}_negative_vwap_ratio": negative_vwap_ratio,
+            f"stk_m_open{count}_vwap_cross_count": float(_count_vwap_crosses(vwap_gap)),
+            f"stk_m_open{count}_vwap_dominant_side_ratio": dominant_side_ratio,
+        }
+    )
+    return result
+
+
 def _compute_vwap_features(day_df: pd.DataFrame, config: MinuteFeatureConfig) -> dict[str, float]:
     result = {
         "stk_m_vwap": np.nan,
@@ -188,17 +241,12 @@ def _compute_vwap_features(day_df: pd.DataFrame, config: MinuteFeatureConfig) ->
     if volume_sum <= 0:
         return result
 
-    cumulative_volume = day_df["volume"].cumsum()
     price_volume = day_df["close"] * day_df["volume"]
-    cumulative_price_volume = price_volume.cumsum()
-    running_vwap = cumulative_price_volume.where(cumulative_volume > 0, np.nan) / cumulative_volume.where(cumulative_volume > 0, np.nan)
-    gap_series = day_df["close"] / running_vwap - 1.0
-    valid_gap = gap_series.replace([np.inf, -np.inf], np.nan).dropna()
+    valid_gap = _build_running_vwap_gap(day_df).dropna()
     if valid_gap.empty:
         return result
 
-    sign_series = np.sign(valid_gap)
-    sign_changes = ((sign_series != sign_series.shift(1)) & (sign_series != 0) & (sign_series.shift(1) != 0)).sum()
+    sign_changes = _count_vwap_crosses(valid_gap)
 
     reversion_count = 0
     gap_values = valid_gap.to_numpy()
@@ -290,6 +338,7 @@ def _compute_intraday_features_for_day(
 
     high_index = int(day_df["high"].idxmax())
     low_index = int(day_df["low"].idxmin())
+    feature_row["stk_m_low_in_first_hour_flag"] = float(low_index < min(60, total_bars))
     feature_row["stk_m_high_time_bucket"] = _time_bucket_for_index(high_index, total_bars, config.high_low_time_buckets)
     feature_row["stk_m_low_time_bucket"] = _time_bucket_for_index(low_index, total_bars, config.high_low_time_buckets)
     feature_row["stk_m_high_before_low_flag"] = float(high_index < low_index)
@@ -372,6 +421,16 @@ def _compute_intraday_features_for_day(
         float((np.sign(nonzero_proxy) == daily_sign).mean()) if daily_sign != 0 and not nonzero_proxy.empty else np.nan
     )
 
+    feature_row.update(_window_vwap_regime_stats(day_df, count=30, anchor_price=first_open))
+    feature_row.update(_window_vwap_regime_stats(day_df, count=60, anchor_price=first_open))
+    open60_low = float(day_df.head(min(60, total_bars))["low"].min()) if total_bars > 0 else np.nan
+    early_drawdown_cash = first_open - open60_low if pd.notna(open60_low) else np.nan
+    feature_row["stk_m_close_recovery_ratio_from_open60_low"] = (
+        _safe_ratio(last_close - open60_low, early_drawdown_cash)
+        if pd.notna(early_drawdown_cash) and float(early_drawdown_cash) > 0
+        else 1.0
+    )
+
     return feature_row
 
 
@@ -408,6 +467,110 @@ def _apply_stock_daily_features(feature_df: pd.DataFrame, config: ProjectConfig)
     return df
 
 
+def _apply_failure_regime_features(feature_df: pd.DataFrame, config: ProjectConfig) -> pd.DataFrame:
+    df = feature_df.copy()
+    label_config = config.strategy_labels
+    min_drawdown = pd.concat(
+        [
+            pd.Series(label_config.hostile_selloff_min_drawdown, index=df.index),
+            df["grid_step_pct_t1"] * label_config.hostile_selloff_grid_step_multiplier,
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    df["flag_open60_deep_selloff"] = (
+        pd.to_numeric(df["stk_m_open60_low_return"], errors="coerce") <= -min_drawdown
+    ).astype(float)
+    df["flag_open60_negative_vwap_persistent"] = (
+        pd.to_numeric(df["stk_m_open60_negative_vwap_ratio"], errors="coerce")
+        >= label_config.hostile_selloff_negative_vwap_ratio_min
+    ).astype(float)
+    df["flag_open60_poor_recovery"] = (
+        pd.to_numeric(df["stk_m_close_recovery_ratio_from_open60_low"], errors="coerce")
+        <= label_config.hostile_selloff_recovery_ratio_max
+    ).astype(float)
+    df["flag_open15_weak_selloff"] = (
+        pd.to_numeric(df["stk_m_open15_return"], errors="coerce") <= label_config.hostile_selloff_open15_return_max
+    ).astype(float)
+    df["flag_open15_heavy_volume"] = (
+        pd.to_numeric(df["stk_m_open15_volume_ratio"], errors="coerce")
+        >= label_config.hostile_selloff_open15_volume_ratio_min
+    ).astype(float)
+    df["flag_close_weak_intraday"] = (
+        pd.to_numeric(df["stk_m_day_return_from_minutes"], errors="coerce") <= label_config.hostile_selloff_close_return_max
+    ).astype(float)
+    df["stk_m_hostile_selloff_soft_score"] = (
+        df["flag_open60_deep_selloff"]
+        + df["stk_m_low_in_first_hour_flag"]
+        + df["flag_open60_poor_recovery"]
+        + df["flag_open60_negative_vwap_persistent"]
+        + df["flag_open15_weak_selloff"]
+        + df["flag_open15_heavy_volume"]
+        + df["flag_close_weak_intraday"]
+    )
+    df["flag_hostile_selloff_regime"] = (
+        df["stk_m_hostile_selloff_soft_score"] >= label_config.hostile_selloff_soft_score_min
+    ).astype(float)
+    df["flag_reversion_failure_regime"] = (
+        (pd.to_numeric(df["stk_m_max_vwap_gap"], errors="coerce") >= config.minute_features.vwap_large_deviation_threshold)
+        & (pd.to_numeric(df["stk_m_reversion_count_after_large_deviation"], errors="coerce") <= 0)
+        & (
+            pd.to_numeric(df["stk_m_open60_negative_vwap_ratio"], errors="coerce")
+            >= label_config.hostile_selloff_negative_vwap_ratio_min
+        )
+    ).astype(float)
+    return df
+
+
+def _apply_relative_environment_features(feature_df: pd.DataFrame, config: ProjectConfig) -> pd.DataFrame:
+    df = feature_df.copy()
+    relative_threshold = config.minute_features.relative_weakness_threshold
+
+    if "idx_daily_return" in df.columns:
+        df["stk_idx_return_spread"] = df["daily_return"] - df["idx_daily_return"]
+        df["stk_idx_gap_spread"] = df["gap_pct"] - df["idx_daily_return"]
+        df["flag_relative_weak_vs_idx"] = (df["stk_idx_return_spread"] <= -relative_threshold).astype(float)
+        df["flag_gap_up_without_index_confirmation"] = (
+            (pd.to_numeric(df["gap_pct"], errors="coerce") > 0)
+            & (pd.to_numeric(df["idx_daily_return"], errors="coerce") <= 0)
+        ).astype(float)
+        if "idx_close_to_ma20" in df.columns:
+            df["stk_idx_close_to_ma20_spread"] = df["close_to_ma20"] - df["idx_close_to_ma20"]
+        else:
+            df["stk_idx_close_to_ma20_spread"] = np.nan
+    else:
+        df["stk_idx_return_spread"] = np.nan
+        df["stk_idx_gap_spread"] = np.nan
+        df["flag_relative_weak_vs_idx"] = 0.0
+        df["flag_gap_up_without_index_confirmation"] = 0.0
+        df["stk_idx_close_to_ma20_spread"] = np.nan
+
+    if "sec_daily_return" in df.columns:
+        df["stk_sec_return_spread"] = df["daily_return"] - df["sec_daily_return"]
+        df["stk_sec_gap_spread"] = df["gap_pct"] - df["sec_daily_return"]
+        df["flag_relative_weak_vs_sec"] = (df["stk_sec_return_spread"] <= -relative_threshold).astype(float)
+        df["flag_gap_up_without_sector_confirmation"] = (
+            (pd.to_numeric(df["gap_pct"], errors="coerce") > 0)
+            & (pd.to_numeric(df["sec_daily_return"], errors="coerce") <= 0)
+        ).astype(float)
+        if "sec_close_to_ma20" in df.columns:
+            df["stk_sec_close_to_ma20_spread"] = df["close_to_ma20"] - df["sec_close_to_ma20"]
+        else:
+            df["stk_sec_close_to_ma20_spread"] = np.nan
+    else:
+        df["stk_sec_return_spread"] = np.nan
+        df["stk_sec_gap_spread"] = np.nan
+        df["flag_relative_weak_vs_sec"] = 0.0
+        df["flag_gap_up_without_sector_confirmation"] = 0.0
+        df["stk_sec_close_to_ma20_spread"] = np.nan
+
+    if "idx_daily_return" in df.columns and "sec_daily_return" in df.columns:
+        df["idx_sec_return_spread"] = df["idx_daily_return"] - df["sec_daily_return"]
+    else:
+        df["idx_sec_return_spread"] = np.nan
+    return df
+
+
 def _apply_rolling_feature_block(feature_df: pd.DataFrame, config: MinuteFeatureConfig) -> pd.DataFrame:
     df = feature_df.copy()
     rolling_targets = [
@@ -422,32 +585,63 @@ def _apply_rolling_feature_block(feature_df: pd.DataFrame, config: MinuteFeature
         "stk_m_trend_efficiency_ratio",
         "stk_m_directional_consistency",
         "stk_m_open15_volume_shock",
+        "stk_m_open30_low_return",
+        "stk_m_open60_low_return",
+        "stk_m_close_recovery_ratio_from_open60_low",
+        "stk_m_open30_negative_vwap_ratio",
+        "stk_m_open60_negative_vwap_ratio",
+        "stk_m_open30_vwap_cross_count",
+        "stk_m_open60_vwap_cross_count",
+        "stk_m_open60_vwap_dominant_side_ratio",
+        "stk_m_hostile_selloff_soft_score",
+        "stk_idx_return_spread",
+        "stk_sec_return_spread",
+        "stk_idx_close_to_ma20_spread",
+        "stk_sec_close_to_ma20_spread",
+        "idx_sec_return_spread",
     ]
+    new_columns: dict[str, pd.Series] = {}
     for column in rolling_targets:
         if column not in df.columns:
             continue
         for window in config.rolling_windows:
-            df[f"{column}_mean_{window}d"] = df[column].rolling(window=window, min_periods=1).mean()
-            df[f"{column}_std_{window}d"] = df[column].rolling(window=window, min_periods=2).std(ddof=0)
+            new_columns[f"{column}_mean_{window}d"] = df[column].rolling(window=window, min_periods=1).mean()
+            new_columns[f"{column}_std_{window}d"] = df[column].rolling(window=window, min_periods=2).std(ddof=0)
 
-    df["flag_large_vwap_deviation"] = (df["stk_m_max_vwap_gap"] >= config.vwap_large_deviation_threshold).astype(float)
-    df["flag_large_intraday_drawdown"] = (df["stk_m_max_drawdown_intraday"] >= config.large_drawdown_threshold).astype(float)
-    df["flag_strong_afternoon_reversal"] = (
+    new_columns["flag_large_vwap_deviation"] = (
+        df["stk_m_max_vwap_gap"] >= config.vwap_large_deviation_threshold
+    ).astype(float)
+    new_columns["flag_large_intraday_drawdown"] = (
+        df["stk_m_max_drawdown_intraday"] >= config.large_drawdown_threshold
+    ).astype(float)
+    new_columns["flag_strong_afternoon_reversal"] = (
         (df["stk_m_am_return"] <= -config.strong_afternoon_reversal_threshold)
         & (df["stk_m_pm_return"] >= config.strong_afternoon_reversal_threshold)
     ).astype(float)
-    df["flag_strong_tail_close"] = (df["stk_m_last30_return"] >= config.strong_tail_close_threshold).astype(float)
+    new_columns["flag_strong_tail_close"] = (
+        df["stk_m_last30_return"] >= config.strong_tail_close_threshold
+    ).astype(float)
 
     flag_columns = [
         "flag_large_vwap_deviation",
         "flag_large_intraday_drawdown",
         "flag_strong_afternoon_reversal",
         "flag_strong_tail_close",
+        "flag_open60_deep_selloff",
+        "flag_open60_negative_vwap_persistent",
+        "flag_open60_poor_recovery",
+        "flag_hostile_selloff_regime",
+        "flag_reversion_failure_regime",
+        "flag_relative_weak_vs_idx",
+        "flag_relative_weak_vs_sec",
+        "flag_gap_up_without_index_confirmation",
+        "flag_gap_up_without_sector_confirmation",
     ]
     for column in flag_columns:
+        source_series = df[column] if column in df.columns else new_columns[column]
         for window in config.rolling_windows:
-            df[f"{column}_rate_{window}d"] = df[column].rolling(window=window, min_periods=1).mean()
-    return df
+            new_columns[f"{column}_rate_{window}d"] = source_series.rolling(window=window, min_periods=1).mean()
+    return pd.concat([df, pd.DataFrame(new_columns, index=df.index)], axis=1)
 
 
 def _environment_daily_status(config: ProjectConfig) -> dict[str, object]:
@@ -586,8 +780,10 @@ def build_feature_table(
         raise ValueError("Feature engine produced no rows. Check the canonical minute source and daily summary inputs.")
 
     feature_df = _apply_stock_daily_features(feature_df, config)
-    feature_df = _apply_rolling_feature_block(feature_df, minute_config)
     feature_df, merged_environment_prefixes = _merge_environment_daily_features(feature_df, config)
+    feature_df = _apply_relative_environment_features(feature_df, config)
+    feature_df = _apply_failure_regime_features(feature_df, config)
+    feature_df = _apply_rolling_feature_block(feature_df, minute_config)
     feature_df, merged_overnight_factor_columns = _merge_overnight_factor_features(feature_df, config)
 
     label_match_count = 0

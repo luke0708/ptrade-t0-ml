@@ -47,7 +47,31 @@ The modeling unit is one row per trading day `t`. All minute features must be co
 - `stk_m_vwap_below_ratio`
 - `stk_m_reversion_count_after_large_deviation`
 
-### C. Volatility And Path Risk
+### C. Early Failure-Regime Context
+
+These features are intended to help the model distinguish:
+
+- apparently clean reversion days
+- from early-path structures that often turn into failed `VWAP` reversion or weak tradability on the next day
+
+- `stk_m_open30_low_return`
+- `stk_m_open60_low_return`
+- `stk_m_low_in_first_hour_flag`
+- `stk_m_close_recovery_ratio_from_open60_low`
+- `stk_m_open30_negative_vwap_ratio`
+- `stk_m_open60_negative_vwap_ratio`
+- `stk_m_open30_vwap_cross_count`
+- `stk_m_open60_vwap_cross_count`
+- `stk_m_open30_vwap_dominant_side_ratio`
+- `stk_m_open60_vwap_dominant_side_ratio`
+- `stk_m_hostile_selloff_soft_score`
+- `flag_open60_deep_selloff`
+- `flag_open60_negative_vwap_persistent`
+- `flag_open60_poor_recovery`
+- `flag_hostile_selloff_regime`
+- `flag_reversion_failure_regime`
+
+### D. Volatility And Path Risk
 
 - `stk_m_realized_volatility`
 - `stk_m_max_drawdown_intraday`
@@ -56,7 +80,7 @@ The modeling unit is one row per trading day `t`. All minute features must be co
 - `stk_m_range_second_half`
 - `stk_m_tail_volatility`
 
-### D. Volume And Flow
+### E. Volume And Flow
 
 - `stk_m_bar_count`
 - `stk_m_open30_volume_ratio`
@@ -65,7 +89,7 @@ The modeling unit is one row per trading day `t`. All minute features must be co
 - `stk_m_volume_spike_count`
 - `stk_m_volume_zscore_close`
 
-### E. Liquidity And Micro Friction
+### F. Liquidity And Micro Friction
 
 These are mandatory additions for the production spec.
 
@@ -86,7 +110,7 @@ These are mandatory additions for the production spec.
 - `stk_m_proxy_ofi_persistence`
   Fraction of bars where the sign of `CLV * volume` matches the daily sign
 
-### F. Rolling Cross-Day Statistics
+### G. Rolling Cross-Day Statistics
 
 Compute rolling statistics on the daily minute-derived features above:
 
@@ -103,8 +127,23 @@ The current production slice also rolls:
 - `stk_m_trend_efficiency_ratio`
 - `stk_m_directional_consistency`
 - `stk_m_open15_volume_shock`
+- `stk_m_open30_low_return`
+- `stk_m_open60_low_return`
+- `stk_m_close_recovery_ratio_from_open60_low`
+- `stk_m_open30_negative_vwap_ratio`
+- `stk_m_open60_negative_vwap_ratio`
+- `stk_m_open30_vwap_cross_count`
+- `stk_m_open60_vwap_cross_count`
+- `stk_m_open60_vwap_dominant_side_ratio`
+- `stk_m_hostile_selloff_soft_score`
+- recent occurrence rates for:
+  - `flag_open60_deep_selloff`
+  - `flag_open60_negative_vwap_persistent`
+  - `flag_open60_poor_recovery`
+  - `flag_hostile_selloff_regime`
+  - `flag_reversion_failure_regime`
 
-### G. Daily Environment Features
+### H. Daily Environment Features
 
 Keep and derive from daily data:
 
@@ -127,7 +166,23 @@ Keep and derive from daily data:
   - `sec_ma5`, `sec_ma20`
   - `sec_close_to_ma20`
 
-### H. Overnight Sentiment Factor Group
+### I. Relative Environment Regime
+
+These features describe whether `300661` is moving with, against, or weaker than the broader environment:
+
+- `stk_idx_return_spread`
+- `stk_sec_return_spread`
+- `stk_idx_gap_spread`
+- `stk_sec_gap_spread`
+- `stk_idx_close_to_ma20_spread`
+- `stk_sec_close_to_ma20_spread`
+- `idx_sec_return_spread`
+- `flag_relative_weak_vs_idx`
+- `flag_relative_weak_vs_sec`
+- `flag_gap_up_without_index_confirmation`
+- `flag_gap_up_without_sector_confirmation`
+
+### J. Overnight Sentiment Factor Group
 
 This group is optional in engineering, but mandatory in the final design.
 
