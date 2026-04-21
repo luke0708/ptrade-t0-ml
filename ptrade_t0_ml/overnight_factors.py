@@ -115,6 +115,16 @@ def build_overnight_factor_file(config: ProjectConfig = DEFAULT_CONFIG) -> Overn
         lambda row: _gap_risk_bucket(row["overnight_semiconductor_return"], row["overnight_nasdaq_return"]),
         axis=1,
     )
+    factor_df["overnight_us_mean_return"] = (
+        factor_df["overnight_semiconductor_return"] + factor_df["overnight_nasdaq_return"]
+    ) / 2.0
+    factor_df["overnight_us_relative_strength_spread"] = (
+        factor_df["overnight_semiconductor_return"] - factor_df["overnight_nasdaq_return"]
+    )
+    factor_df["overnight_us_direction_agreement_flag"] = (
+        np.sign(factor_df["overnight_semiconductor_return"])
+        == np.sign(factor_df["overnight_nasdaq_return"])
+    ).astype(int)
     factor_df = factor_df.sort_values("date").reset_index(drop=True)
     save_dataframe(factor_df, config.overnight_factors_path)
 

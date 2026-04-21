@@ -158,11 +158,13 @@ Keep and derive from daily data:
 - Index daily features:
   - `idx_daily_return`
   - `idx_daily_range`
+  - `idx_gap_pct`
   - `idx_ma5`, `idx_ma20`
   - `idx_close_to_ma20`
 - Sector daily features:
   - `sec_daily_return`
   - `sec_daily_range`
+  - `sec_gap_pct`
   - `sec_ma5`, `sec_ma20`
   - `sec_close_to_ma20`
 
@@ -177,6 +179,7 @@ These features describe whether `300661` is moving with, against, or weaker than
 - `stk_idx_close_to_ma20_spread`
 - `stk_sec_close_to_ma20_spread`
 - `idx_sec_return_spread`
+- `idx_sec_gap_spread`
 - `flag_relative_weak_vs_idx`
 - `flag_relative_weak_vs_sec`
 - `flag_gap_up_without_index_confirmation`
@@ -189,8 +192,13 @@ This group is optional in engineering, but mandatory in the final design.
 - `overnight_semiconductor_return`
 - `overnight_nasdaq_return`
 - `overnight_gap_risk_bucket`
+- `overnight_us_mean_return`
+- `overnight_us_relative_strength_spread`
+- `overnight_us_direction_agreement_flag`
 
 Use SOXX first when available, but the spec must not hard-code SOXX as the only acceptable factor.
+When `data/soxx_daily.csv` and `data/nasdaq_daily.csv` are present locally, `build_feature_engine.py`
+should refresh `overnight_factors.csv` automatically before merging these fields.
 
 ## Data Quality Rules
 

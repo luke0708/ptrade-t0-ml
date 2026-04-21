@@ -13,6 +13,7 @@ from .config import DEFAULT_CONFIG, MinuteFeatureConfig, ProjectConfig
 from .io_utils import atomic_write_json, save_dataframe
 from .minute_foundation import configure_logging as configure_foundation_logging
 from .minute_foundation import run_minute_foundation
+from .overnight_factors import build_overnight_factor_file
 
 LOGGER = logging.getLogger(__name__)
 
@@ -528,11 +529,15 @@ def _apply_relative_environment_features(feature_df: pd.DataFrame, config: Proje
 
     if "idx_daily_return" in df.columns:
         df["stk_idx_return_spread"] = df["daily_return"] - df["idx_daily_return"]
-        df["stk_idx_gap_spread"] = df["gap_pct"] - df["idx_daily_return"]
+        if "idx_gap_pct" in df.columns:
+            df["stk_idx_gap_spread"] = df["gap_pct"] - df["idx_gap_pct"]
+        else:
+            df["stk_idx_gap_spread"] = np.nan
         df["flag_relative_weak_vs_idx"] = (df["stk_idx_return_spread"] <= -relative_threshold).astype(float)
+        idx_gap_reference = df["idx_gap_pct"] if "idx_gap_pct" in df.columns else df["idx_daily_return"]
         df["flag_gap_up_without_index_confirmation"] = (
             (pd.to_numeric(df["gap_pct"], errors="coerce") > 0)
-            & (pd.to_numeric(df["idx_daily_return"], errors="coerce") <= 0)
+            & (pd.to_numeric(idx_gap_reference, errors="coerce") <= 0)
         ).astype(float)
         if "idx_close_to_ma20" in df.columns:
             df["stk_idx_close_to_ma20_spread"] = df["close_to_ma20"] - df["idx_close_to_ma20"]
@@ -547,11 +552,15 @@ def _apply_relative_environment_features(feature_df: pd.DataFrame, config: Proje
 
     if "sec_daily_return" in df.columns:
         df["stk_sec_return_spread"] = df["daily_return"] - df["sec_daily_return"]
-        df["stk_sec_gap_spread"] = df["gap_pct"] - df["sec_daily_return"]
+        if "sec_gap_pct" in df.columns:
+            df["stk_sec_gap_spread"] = df["gap_pct"] - df["sec_gap_pct"]
+        else:
+            df["stk_sec_gap_spread"] = np.nan
         df["flag_relative_weak_vs_sec"] = (df["stk_sec_return_spread"] <= -relative_threshold).astype(float)
+        sec_gap_reference = df["sec_gap_pct"] if "sec_gap_pct" in df.columns else df["sec_daily_return"]
         df["flag_gap_up_without_sector_confirmation"] = (
             (pd.to_numeric(df["gap_pct"], errors="coerce") > 0)
-            & (pd.to_numeric(df["sec_daily_return"], errors="coerce") <= 0)
+            & (pd.to_numeric(sec_gap_reference, errors="coerce") <= 0)
         ).astype(float)
         if "sec_close_to_ma20" in df.columns:
             df["stk_sec_close_to_ma20_spread"] = df["close_to_ma20"] - df["sec_close_to_ma20"]
@@ -568,6 +577,10 @@ def _apply_relative_environment_features(feature_df: pd.DataFrame, config: Proje
         df["idx_sec_return_spread"] = df["idx_daily_return"] - df["sec_daily_return"]
     else:
         df["idx_sec_return_spread"] = np.nan
+    if "idx_gap_pct" in df.columns and "sec_gap_pct" in df.columns:
+        df["idx_sec_gap_spread"] = df["idx_gap_pct"] - df["sec_gap_pct"]
+    else:
+        df["idx_sec_gap_spread"] = np.nan
     return df
 
 
@@ -596,9 +609,17 @@ def _apply_rolling_feature_block(feature_df: pd.DataFrame, config: MinuteFeature
         "stk_m_hostile_selloff_soft_score",
         "stk_idx_return_spread",
         "stk_sec_return_spread",
+        "stk_idx_gap_spread",
+        "stk_sec_gap_spread",
         "stk_idx_close_to_ma20_spread",
         "stk_sec_close_to_ma20_spread",
         "idx_sec_return_spread",
+        "idx_sec_gap_spread",
+        "overnight_semiconductor_return",
+        "overnight_nasdaq_return",
+        "overnight_us_mean_return",
+        "overnight_us_relative_strength_spread",
+        "overnight_gap_risk_bucket",
     ]
     new_columns: dict[str, pd.Series] = {}
     for column in rolling_targets:
@@ -686,6 +707,7 @@ def _load_environment_daily_frame(path: Path, prefix: str) -> pd.DataFrame:
     previous_close = normalized_df["close"].shift(1)
     normalized_df[f"{prefix}_daily_return"] = normalized_df["close"] / previous_close - 1.0
     normalized_df[f"{prefix}_daily_range"] = (normalized_df["high"] - normalized_df["low"]) / previous_close
+    normalized_df[f"{prefix}_gap_pct"] = normalized_df["open"] / previous_close - 1.0
     normalized_df[f"{prefix}_ma5"] = normalized_df["close"].rolling(window=5, min_periods=1).mean()
     normalized_df[f"{prefix}_ma20"] = normalized_df["close"].rolling(window=20, min_periods=1).mean()
     normalized_df[f"{prefix}_close_to_ma20"] = normalized_df["close"] / normalized_df[f"{prefix}_ma20"] - 1.0
@@ -700,6 +722,7 @@ def _load_environment_daily_frame(path: Path, prefix: str) -> pd.DataFrame:
         f"{prefix}_amount",
         f"{prefix}_daily_return",
         f"{prefix}_daily_range",
+        f"{prefix}_gap_pct",
         f"{prefix}_ma5",
         f"{prefix}_ma20",
         f"{prefix}_close_to_ma20",
@@ -732,14 +755,20 @@ def _load_overnight_factor_frame(path: Path) -> pd.DataFrame:
         "overnight_nasdaq_return",
         "overnight_gap_risk_bucket",
     ]
+    optional_columns = [
+        "overnight_us_mean_return",
+        "overnight_us_relative_strength_spread",
+        "overnight_us_direction_agreement_flag",
+    ]
     missing_columns = [column for column in required_columns if column not in df.columns]
     if missing_columns:
         raise ValueError(f"Overnight factor file is missing required columns {missing_columns}: {path}")
 
-    normalized_df = df.loc[:, required_columns].copy()
+    selected_columns = required_columns + [column for column in optional_columns if column in df.columns]
+    normalized_df = df.loc[:, selected_columns].copy()
     normalized_df["date"] = pd.to_datetime(normalized_df["date"], errors="coerce")
     normalized_df = normalized_df.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
-    for column in required_columns[1:]:
+    for column in selected_columns[1:]:
         normalized_df[column] = pd.to_numeric(normalized_df[column], errors="coerce")
     normalized_df["date"] = normalized_df["date"].dt.strftime("%Y-%m-%d")
     return normalized_df
@@ -754,6 +783,22 @@ def _merge_overnight_factor_features(feature_df: pd.DataFrame, config: ProjectCo
     merged_df = feature_df.merge(overnight_df, on="date", how="left", validate="one_to_one")
     merged_columns = [column for column in overnight_df.columns if column != "date"]
     return merged_df, merged_columns
+
+
+def _maybe_refresh_overnight_factor_file(config: ProjectConfig) -> dict[str, object] | None:
+    source_paths = (
+        config.overnight_semiconductor_source_path,
+        config.overnight_nasdaq_source_path,
+    )
+    if not all(path.exists() and path.stat().st_size > 32 for path in source_paths):
+        return None
+
+    try:
+        result = build_overnight_factor_file(config)
+    except Exception as exc:
+        LOGGER.warning("Failed to refresh overnight factors from local sources: %s", exc)
+        return None
+    return result.source_summary
 
 
 def build_feature_table(
@@ -781,10 +826,10 @@ def build_feature_table(
 
     feature_df = _apply_stock_daily_features(feature_df, config)
     feature_df, merged_environment_prefixes = _merge_environment_daily_features(feature_df, config)
+    feature_df, merged_overnight_factor_columns = _merge_overnight_factor_features(feature_df, config)
     feature_df = _apply_relative_environment_features(feature_df, config)
     feature_df = _apply_failure_regime_features(feature_df, config)
     feature_df = _apply_rolling_feature_block(feature_df, minute_config)
-    feature_df, merged_overnight_factor_columns = _merge_overnight_factor_features(feature_df, config)
 
     label_match_count = 0
     if config.label_targets_path.exists():
@@ -837,7 +882,10 @@ def build_feature_table(
 
 def run_feature_engine(config: ProjectConfig = DEFAULT_CONFIG) -> FeatureEngineResult:
     canonical_df, daily_summary_df = _load_feature_inputs(config)
+    overnight_factor_build_summary = _maybe_refresh_overnight_factor_file(config)
     result = build_feature_table(canonical_df, daily_summary_df, config=config)
+    if overnight_factor_build_summary is not None:
+        result.audit_payload["overnight_factor_build_summary"] = overnight_factor_build_summary
     save_dataframe(result.feature_df, config.feature_table_path)
     atomic_write_json(config.feature_audit_path, result.audit_payload)
 

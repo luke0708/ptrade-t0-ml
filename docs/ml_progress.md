@@ -13,6 +13,68 @@
 - Workstream: `300661` long-history minute-data ML system
 - Overall status: `in_progress`
 
+## Recent Updates
+
+### Daily / Weekly Runbook Unified
+
+Status: `done`
+
+The daily and weekly operating docs have been fully unified across:
+
+- `README.md`
+- `Project Plan.md`
+- `docs/mac_daily_weekly_runbook.md`
+
+Current fixed truth:
+
+- daily production uses:
+  - `python daily_backfill_data_mac.py`
+  - `python build_minute_foundation.py`
+  - `python build_feature_engine.py`
+  - `python export_ml_daily_signal.py`
+- weekend research uses:
+  - `python build_label_engine.py`
+  - `python train_baseline_models.py`
+  - `python analyze_baseline_quality.py`
+  - `python analyze_walk_forward.py`
+  - `python analyze_walk_forward_failures.py`
+- model adoption is a separate, explicit step:
+  - `python promote_baseline_candidate.py`
+  - `python export_ml_daily_signal.py`
+
+Clarified dependency rules:
+
+- `300661 1m` and `feature_table` are hard dependencies for daily inference
+- `399006` and `512480` are soft dependencies for daily inference
+- stale soft dependencies do not block export, but force the exported signal down to `SAFE`
+
+### Overnight Factors And Downside Research Head
+
+Status: `done`
+
+We completed two model-quality plumbing changes:
+
+- `build_feature_engine.py` now auto-refreshes `overnight_factors.csv` when local
+  `data/soxx_daily.csv` and `data/nasdaq_daily.csv` are present
+- the merged overnight factor group now includes:
+  - `overnight_us_mean_return`
+  - `overnight_us_relative_strength_spread`
+  - `overnight_us_direction_agreement_flag`
+- environment gap context now explicitly includes:
+  - `idx_gap_pct`
+  - `sec_gap_pct`
+  - `stk_idx_gap_spread`
+  - `stk_sec_gap_spread`
+  - `idx_sec_gap_spread`
+
+We also promoted `target_downside_from_open_t1` from a passive diagnostic label into a research-only regression head:
+
+- head name: `downside_from_open_regression`
+- purpose:
+  - compare open-anchored downside ranking against the legacy close-anchored downside
+  - keep production control unchanged while research continues
+- production control still prioritizes `target_hostile_selloff_risk_t1`
+
 ## What Is Already Settled
 
 ### Strategy Understanding
@@ -905,6 +967,36 @@ Signal-date improvement:
   - `ml_daily_signal.json`
   - `ptrade_300661_YYYYMMDD.py`
 aligned with the next actual trading day across holiday gaps
+
+## Candidate / Production Model Split
+
+The repo now separates research training from daily production inference:
+
+- production model directory:
+  - `models/baseline_stock_only/`
+- candidate model directory:
+  - `models/baseline_candidate/`
+
+Current behavior:
+
+- `train_baseline_models.py`
+  - trains into candidate
+- `analyze_baseline_quality.py`
+  - reads / builds candidate
+- `analyze_walk_forward.py`
+  - reads / builds candidate
+- `analyze_walk_forward_failures.py`
+  - reads / builds candidate
+- `export_ml_daily_signal.py`
+  - reads production only
+- `promote_baseline_candidate.py`
+  - is now the explicit acceptance step from candidate -> production
+
+Reasoning:
+
+- daily inference should stay stable across weekdays
+- weekly research retrains should not silently replace the production model
+- model acceptance is now a distinct operational action instead of an accidental side-effect of training
 
 ## Mac Backfill Freshness Guard
 

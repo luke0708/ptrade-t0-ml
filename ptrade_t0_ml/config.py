@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 import os
 from pathlib import Path
@@ -112,6 +112,7 @@ class ProjectConfig:
     base_dir: Path
     runtime_data_dir: Path | None = None
     archive_data_dir: Path | None = None
+    baseline_model_slot: str = "production"
     stock_symbol: str = "300661"
     stock_exchange: str = "SZ"
     start_date: str = "2020-01-01"
@@ -283,12 +284,36 @@ class ProjectConfig:
         return self.data_dir / "nasdaq_daily.csv"
 
     @property
-    def baseline_models_dir(self) -> Path:
+    def production_baseline_models_dir(self) -> Path:
         return self.models_dir / "baseline_stock_only"
 
     @property
+    def production_baseline_metadata_path(self) -> Path:
+        return self.production_baseline_models_dir / "baseline_stock_only_metadata.json"
+
+    @property
+    def candidate_baseline_models_dir(self) -> Path:
+        return self.models_dir / "baseline_candidate"
+
+    @property
+    def candidate_baseline_metadata_path(self) -> Path:
+        return self.candidate_baseline_models_dir / "baseline_candidate_metadata.json"
+
+    @property
+    def baseline_models_dir(self) -> Path:
+        if self.baseline_model_slot == "production":
+            return self.production_baseline_models_dir
+        if self.baseline_model_slot == "candidate":
+            return self.candidate_baseline_models_dir
+        raise ValueError(f"Unsupported baseline_model_slot: {self.baseline_model_slot}")
+
+    @property
     def baseline_metadata_path(self) -> Path:
-        return self.baseline_models_dir / "baseline_stock_only_metadata.json"
+        if self.baseline_model_slot == "production":
+            return self.production_baseline_metadata_path
+        if self.baseline_model_slot == "candidate":
+            return self.candidate_baseline_metadata_path
+        raise ValueError(f"Unsupported baseline_model_slot: {self.baseline_model_slot}")
 
     @property
     def features_path(self) -> Path:
@@ -366,3 +391,5 @@ DEFAULT_CONFIG = ProjectConfig(
     runtime_data_dir=_resolve_optional_path("PTRADE_RUNTIME_DATA_DIR"),
     archive_data_dir=_resolve_optional_path("PTRADE_ARCHIVE_DATA_DIR"),
 )
+
+CANDIDATE_CONFIG = replace(DEFAULT_CONFIG, baseline_model_slot="candidate")

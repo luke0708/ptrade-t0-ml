@@ -28,9 +28,8 @@ DEFAULT_BUCKET_COUNT = 5
 DEFAULT_TOP_N = 50
 DEFAULT_IMPORTANCE_LIMIT = 30
 
-HEAD_TO_SIGNAL_FIELD = {
-    **REGRESSION_HEAD_TO_SIGNAL_FIELD,
-    **CLASSIFICATION_HEAD_TO_SIGNAL_FIELD,
+RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD = {
+    "downside_from_open_regression": "pred_downside_from_open_t1",
 }
 
 DOWNSIDE_CONTEXT_COLUMNS = [
@@ -220,6 +219,10 @@ def select_downside_error_cases(
         "target_downside_t1",
         "downside_prediction_error",
         "downside_abs_error",
+        "pred_downside_from_open_t1",
+        "target_downside_from_open_t1",
+        "downside_from_open_prediction_error",
+        "downside_from_open_abs_error",
         "predicted_downside_rank",
         "actual_downside_rank",
         "downside_abs_error_rank",
@@ -246,6 +249,7 @@ def select_downside_error_cases(
         "recommended_grid_width_t1",
     ]
     ordered_columns.extend(column for column in context_columns if column in selected.columns)
+    ordered_columns = [column for column in ordered_columns if column in selected.columns]
 
     return selected[ordered_columns].sort_values(
         by=["in_largest_abs_error_top_n", "downside_abs_error", "target_downside_t1"],
@@ -344,8 +348,13 @@ def _score_test_dataset(
         if column in test_df.columns and column not in existing_output_columns
     )
     predictions_df = test_df[output_columns].copy().reset_index(drop=True)
+    regression_head_to_signal_field = _available_regression_head_mapping(metadata)
+    head_to_signal_field = {
+        **regression_head_to_signal_field,
+        **CLASSIFICATION_HEAD_TO_SIGNAL_FIELD,
+    }
 
-    for head_name, signal_field in REGRESSION_HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in regression_head_to_signal_field.items():
         model = build_xgb_regressor(config)
         model.load_model(metadata["heads"][head_name]["model_path"])
         predictions_df[signal_field] = model.predict(X_test)
@@ -364,7 +373,7 @@ def _score_test_dataset(
         predictions_df[f"{signal_field}_on"] = predictions_df[signal_field] >= threshold
 
     runtime_controls_records = []
-    prediction_fields = list(HEAD_TO_SIGNAL_FIELD.values())
+    prediction_fields = list(REGRESSION_HEAD_TO_SIGNAL_FIELD.values()) + list(CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.values())
     for row_index in range(len(predictions_df)):
         row_predictions = {
             signal_field: float(predictions_df.iloc[row_index][signal_field])
@@ -380,7 +389,7 @@ def _score_test_dataset(
     runtime_controls_df = pd.DataFrame(runtime_controls_records)
     predictions_df = pd.concat([predictions_df, runtime_controls_df], axis=1)
 
-    for signal_field in prediction_fields:
+    for signal_field in head_to_signal_field.values():
         predictions_df[f"{signal_field}_bucket"] = assign_score_buckets(
             predictions_df[signal_field],
             bucket_count=bucket_count,
@@ -390,6 +399,11 @@ def _score_test_dataset(
         predictions_df["pred_downside_t1"] - predictions_df["target_downside_t1"]
     )
     predictions_df["downside_abs_error"] = predictions_df["downside_prediction_error"].abs()
+    if "pred_downside_from_open_t1" in predictions_df.columns and "target_downside_from_open_t1" in predictions_df.columns:
+        predictions_df["downside_from_open_prediction_error"] = (
+            predictions_df["pred_downside_from_open_t1"] - predictions_df["target_downside_from_open_t1"]
+        )
+        predictions_df["downside_from_open_abs_error"] = predictions_df["downside_from_open_prediction_error"].abs()
     return predictions_df
 
 
@@ -399,8 +413,12 @@ def _build_head_bucket_summary(
 ) -> pd.DataFrame:
     summary_rows: list[dict[str, object]] = []
     total_rows = len(predictions_df)
+    head_to_signal_field = {
+        **_available_regression_head_mapping(metadata),
+        **CLASSIFICATION_HEAD_TO_SIGNAL_FIELD,
+    }
 
-    for head_name, signal_field in HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in head_to_signal_field.items():
         bucket_column = f"{signal_field}_bucket"
         if bucket_column not in predictions_df.columns:
             continue
@@ -444,7 +462,7 @@ def _extract_head_feature_importance(
         raise ValueError("limit_per_head must be positive.")
 
     for head_name, head_metadata in metadata["heads"].items():
-        if head_name in REGRESSION_HEAD_TO_SIGNAL_FIELD:
+        if head_name in REGRESSION_HEAD_TO_SIGNAL_FIELD or head_name in RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD:
             model = build_xgb_regressor(config)
         else:
             model = build_xgb_classifier(config, scale_pos_weight=1.0)
@@ -472,6 +490,18 @@ def _extract_head_feature_importance(
             )
 
     return pd.DataFrame(rows).sort_values(["head_name", "rank"]).reset_index(drop=True)
+
+
+def _available_regression_head_mapping(metadata: dict[str, object]) -> dict[str, str]:
+    mapping = dict(REGRESSION_HEAD_TO_SIGNAL_FIELD)
+    mapping.update(
+        {
+            head_name: signal_field
+            for head_name, signal_field in RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD.items()
+            if head_name in metadata["heads"]
+        }
+    )
+    return mapping
 
 
 def _summarize_mode_segment(
@@ -533,8 +563,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_foundation_logging()
     args = build_parser().parse_args()
+    from .config import CANDIDATE_CONFIG
+
     build_baseline_quality_report(
-        DEFAULT_CONFIG,
+        CANDIDATE_CONFIG,
         bucket_count=args.bucket_count,
         downside_top_n=args.downside_top_n,
         feature_importance_limit=args.feature_importance_limit,

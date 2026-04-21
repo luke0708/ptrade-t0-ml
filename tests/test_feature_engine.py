@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 
 from ptrade_t0_ml.config import ProjectConfig
-from ptrade_t0_ml.feature_engine import build_feature_table
+from ptrade_t0_ml.feature_engine import build_feature_table, run_feature_engine
 
 
 def _build_day_frame(trade_date: str, start_open: float, end_close: float) -> tuple[pd.DataFrame, dict[str, object]]:
@@ -195,14 +195,23 @@ class FeatureEngineTests(unittest.TestCase):
         self.assertIn("sec_close", feature_df.columns)
         self.assertIn("stk_idx_return_spread", feature_df.columns)
         self.assertIn("stk_sec_return_spread", feature_df.columns)
+        self.assertIn("idx_gap_pct", feature_df.columns)
+        self.assertIn("sec_gap_pct", feature_df.columns)
+        self.assertIn("idx_sec_gap_spread", feature_df.columns)
         self.assertIn("stk_idx_close_to_ma20_spread", feature_df.columns)
         self.assertIn("flag_relative_weak_vs_sec_rate_3d", feature_df.columns)
         self.assertAlmostEqual(feature_df.iloc[0]["idx_close"], 2010.0, places=6)
         self.assertAlmostEqual(feature_df.iloc[1]["sec_ma5"], (1.52 + 1.55) / 2.0, places=6)
         expected_idx_spread = feature_df.iloc[1]["daily_return"] - feature_df.iloc[1]["idx_daily_return"]
         expected_sec_spread = feature_df.iloc[1]["daily_return"] - feature_df.iloc[1]["sec_daily_return"]
+        expected_idx_gap_spread = feature_df.iloc[1]["gap_pct"] - feature_df.iloc[1]["idx_gap_pct"]
+        expected_sec_gap_spread = feature_df.iloc[1]["gap_pct"] - feature_df.iloc[1]["sec_gap_pct"]
         self.assertAlmostEqual(feature_df.iloc[1]["stk_idx_return_spread"], expected_idx_spread, places=6)
         self.assertAlmostEqual(feature_df.iloc[1]["stk_sec_return_spread"], expected_sec_spread, places=6)
+        self.assertAlmostEqual(feature_df.iloc[1]["stk_idx_gap_spread"], expected_idx_gap_spread, places=6)
+        self.assertAlmostEqual(feature_df.iloc[1]["stk_sec_gap_spread"], expected_sec_gap_spread, places=6)
+        self.assertEqual(int(feature_df.iloc[1]["flag_gap_up_without_index_confirmation"]), 1)
+        self.assertEqual(int(feature_df.iloc[1]["flag_gap_up_without_sector_confirmation"]), 1)
         self.assertEqual(result.audit_payload["merged_environment_prefixes"], ["idx", "sec"])
 
     def test_build_feature_table_merges_optional_overnight_factors(self) -> None:
@@ -221,6 +230,9 @@ class FeatureEngineTests(unittest.TestCase):
                     "overnight_semiconductor_return": [0.012, -0.008],
                     "overnight_nasdaq_return": [0.006, -0.004],
                     "overnight_gap_risk_bucket": [2, 1],
+                    "overnight_us_mean_return": [0.009, -0.006],
+                    "overnight_us_relative_strength_spread": [0.006, -0.004],
+                    "overnight_us_direction_agreement_flag": [1, 1],
                 }
             ).to_csv(data_dir / "overnight_factors.csv", index=False)
 
@@ -231,10 +243,20 @@ class FeatureEngineTests(unittest.TestCase):
         self.assertIn("overnight_semiconductor_return", feature_df.columns)
         self.assertIn("overnight_nasdaq_return", feature_df.columns)
         self.assertIn("overnight_gap_risk_bucket", feature_df.columns)
+        self.assertIn("overnight_us_mean_return", feature_df.columns)
+        self.assertIn("overnight_us_relative_strength_spread", feature_df.columns)
+        self.assertIn("overnight_us_direction_agreement_flag", feature_df.columns)
         self.assertAlmostEqual(feature_df.iloc[0]["overnight_semiconductor_return"], 0.012, places=6)
         self.assertEqual(
             result.audit_payload["merged_overnight_factor_columns"],
-            ["overnight_semiconductor_return", "overnight_nasdaq_return", "overnight_gap_risk_bucket"],
+            [
+                "overnight_semiconductor_return",
+                "overnight_nasdaq_return",
+                "overnight_gap_risk_bucket",
+                "overnight_us_mean_return",
+                "overnight_us_relative_strength_spread",
+                "overnight_us_direction_agreement_flag",
+            ],
         )
 
     def test_build_feature_table_flags_same_day_hostile_regime(self) -> None:
@@ -253,6 +275,40 @@ class FeatureEngineTests(unittest.TestCase):
         self.assertLessEqual(hostile_row["stk_m_close_recovery_ratio_from_open60_low"], 0.55)
         self.assertGreaterEqual(hostile_row["stk_m_hostile_selloff_soft_score"], 6.0)
         self.assertEqual(int(hostile_row["flag_hostile_selloff_regime"]), 1)
+
+    def test_run_feature_engine_auto_builds_overnight_factor_file_when_raw_sources_exist(self) -> None:
+        day_one_df, day_one_summary = _build_day_frame("2026-04-10", 10.0, 10.5)
+        day_two_df, day_two_summary = _build_day_frame("2026-04-11", 10.6, 11.0)
+        canonical_df = pd.concat([day_one_df, day_two_df], ignore_index=True)
+        daily_summary_df = pd.DataFrame([day_one_summary, day_two_summary])
+
+        with TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            foundation_dir = base_dir / "data" / "foundation"
+            foundation_dir.mkdir(parents=True, exist_ok=True)
+            canonical_df.to_csv(foundation_dir / "300661_SZ_1m_canonical.csv", index=False)
+            daily_summary_df.to_csv(foundation_dir / "300661_SZ_1m_daily_summary.csv", index=False)
+            pd.DataFrame(
+                {
+                    "date": ["2026-04-09", "2026-04-10"],
+                    "close": [100.0, 102.0],
+                }
+            ).to_csv(base_dir / "data" / "soxx_daily.csv", index=False)
+            pd.DataFrame(
+                {
+                    "date": ["2026-04-09", "2026-04-10"],
+                    "close": [15000.0, 15150.0],
+                }
+            ).to_csv(base_dir / "data" / "nasdaq_daily.csv", index=False)
+
+            config = ProjectConfig(base_dir=base_dir)
+            result = run_feature_engine(config)
+
+            overnight_factors_path = base_dir / "data" / "overnight_factors.csv"
+            self.assertTrue(overnight_factors_path.exists())
+            self.assertIn("overnight_semiconductor_return", result.feature_df.columns)
+            self.assertIn("overnight_us_relative_strength_spread", result.feature_df.columns)
+            self.assertIn("overnight_factor_build_summary", result.audit_payload)
 
 
 if __name__ == "__main__":

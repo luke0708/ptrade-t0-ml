@@ -28,6 +28,12 @@ These are not automatically the production downside head. They exist so we can c
 
 before choosing which definition best reflects real next-day hostile selloff risk for `300661`.
 
+Current implementation note:
+
+- `target_downside_from_open_t1` is now also trained as a research-only regression head
+- this head is intended for candidate analysis and walk-forward comparison
+- it must not directly replace the live downside controller unless later evidence clearly shows it is better
+
 ## Primary Strategy Labels
 
 ### A. Tradability

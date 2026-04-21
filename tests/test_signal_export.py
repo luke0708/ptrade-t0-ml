@@ -2,6 +2,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 import tempfile
+import json
 
 import pandas as pd
 
@@ -12,6 +13,7 @@ from ptrade_t0_ml.signal_export import (
     _collect_daily_inference_dependency_status,
     _derive_runtime_controls,
     _expected_feature_date,
+    _load_baseline_metadata,
     _next_trading_day,
     _next_weekday,
 )
@@ -235,6 +237,21 @@ class SignalExportTests(unittest.TestCase):
         self.assertEqual(controls["recommended_mode"], "SAFE")
         self.assertEqual(controls["signal_rationale"], "positive_grid_without_tradable_confirmation")
         self.assertFalse(controls["dip_buy_enabled"])
+
+    def test_load_baseline_metadata_requires_promote_when_only_candidate_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            candidate_dir = temp_dir / "models" / "baseline_candidate"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            (candidate_dir / "baseline_candidate_metadata.json").write_text(
+                json.dumps({"model_slot": "candidate"}),
+                encoding="utf-8",
+            )
+
+            config = ProjectConfig(base_dir=temp_dir, baseline_model_slot="production")
+
+            with self.assertRaisesRegex(FileNotFoundError, "promote_baseline_candidate.py"):
+                _load_baseline_metadata(config)
 
 
 if __name__ == "__main__":

@@ -359,8 +359,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_foundation_logging()
     args = build_parser().parse_args()
+    from .config import CANDIDATE_CONFIG
+
     build_walk_forward_failure_report(
-        config=DEFAULT_CONFIG,
+        config=CANDIDATE_CONFIG,
         top_case_count=args.top_case_count,
     )
 

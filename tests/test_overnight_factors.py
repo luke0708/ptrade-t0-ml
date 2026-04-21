@@ -34,11 +34,25 @@ class OvernightFactorTests(unittest.TestCase):
             result = build_overnight_factor_file(ProjectConfig(base_dir=base_dir))
 
         factor_df = result.factor_df
-        self.assertEqual(list(factor_df.columns), ["date", "overnight_semiconductor_return", "overnight_nasdaq_return", "overnight_gap_risk_bucket"])
+        self.assertEqual(
+            list(factor_df.columns),
+            [
+                "date",
+                "overnight_semiconductor_return",
+                "overnight_nasdaq_return",
+                "overnight_gap_risk_bucket",
+                "overnight_us_mean_return",
+                "overnight_us_relative_strength_spread",
+                "overnight_us_direction_agreement_flag",
+            ],
+        )
         self.assertEqual(factor_df.iloc[0]["date"], "2026-04-15")
         self.assertAlmostEqual(factor_df.iloc[0]["overnight_semiconductor_return"], 0.02, places=6)
         self.assertAlmostEqual(factor_df.iloc[0]["overnight_nasdaq_return"], 0.01, places=6)
         self.assertEqual(int(factor_df.iloc[0]["overnight_gap_risk_bucket"]), 2)
+        self.assertAlmostEqual(factor_df.iloc[0]["overnight_us_mean_return"], 0.015, places=6)
+        self.assertAlmostEqual(factor_df.iloc[0]["overnight_us_relative_strength_spread"], 0.01, places=6)
+        self.assertEqual(int(factor_df.iloc[0]["overnight_us_direction_agreement_flag"]), 1)
 
 
 if __name__ == "__main__":

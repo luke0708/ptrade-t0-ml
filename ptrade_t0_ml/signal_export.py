@@ -36,7 +36,20 @@ CLASSIFICATION_HEAD_TO_SIGNAL_FIELD = {
 
 def _load_baseline_metadata(config: ProjectConfig) -> dict[str, object]:
     if not config.baseline_metadata_path.exists():
-        LOGGER.info("Baseline metadata missing. Training baseline models first.")
+        if config.baseline_model_slot == "production":
+            candidate_path = config.candidate_baseline_metadata_path
+            if candidate_path.exists():
+                raise FileNotFoundError(
+                    "Production baseline metadata is missing. "
+                    f"Candidate baseline exists at {candidate_path}. "
+                    "Run `python promote_baseline_candidate.py` after you decide to accept the candidate model."
+                )
+            raise FileNotFoundError(
+                "Production baseline metadata is missing. "
+                "Run `python train_baseline_models.py` to build the candidate model first, "
+                "then run `python promote_baseline_candidate.py` to promote it into production."
+            )
+        LOGGER.info("Baseline metadata missing for slot=%s. Training baseline models first.", config.baseline_model_slot)
         train_baseline_models(config)
     return json.loads(config.baseline_metadata_path.read_text(encoding="utf-8"))
 
@@ -395,6 +408,7 @@ def build_ml_daily_signal(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         "feature_source_path": str(config.feature_table_path),
         "model_metadata_path": str(config.baseline_metadata_path),
         "model_version": model_version,
+        "model_slot": str(metadata.get("model_slot", config.baseline_model_slot)),
         "feature_version": feature_version,
         "threshold_version": threshold_version,
         "signal_status": "experimental_baseline_soft_degraded" if soft_dependency_degraded else "experimental_baseline",

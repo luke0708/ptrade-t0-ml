@@ -39,6 +39,9 @@ DEFAULT_TRAIN_WINDOW_ROWS = 756
 DEFAULT_TEST_WINDOW_ROWS = 63
 DEFAULT_STEP_ROWS = 63
 DEFAULT_MIN_TEST_ROWS = 21
+RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD = {
+    "downside_from_open_regression": "pred_downside_from_open_t1",
+}
 
 
 @dataclass(frozen=True)
@@ -228,8 +231,9 @@ def _score_walk_forward_window(
     predictions_df = test_df[_build_prediction_output_columns(test_df)].copy().reset_index(drop=True)
     head_metric_rows: list[dict[str, object]] = []
     thresholds: dict[str, float] = {}
+    regression_head_to_signal_field = _available_regression_head_mapping(train_df)
 
-    for head_name, signal_field in REGRESSION_HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in regression_head_to_signal_field.items():
         target_column = _head_target_column(head_name)
         model = build_xgb_regressor(config)
         model.fit(X_train, train_df[target_column])
@@ -359,6 +363,7 @@ def _head_target_column(head_name: str) -> str:
     mapping = {
         "upside_regression": "target_upside_t1",
         "downside_regression": "target_downside_t1",
+        "downside_from_open_regression": "target_downside_from_open_t1",
         "grid_pnl_regression": "target_grid_pnl_t1",
         "positive_grid_day_classifier": "target_positive_grid_day_t1",
         "tradable_classifier": "target_tradable_score_t1",
@@ -367,6 +372,13 @@ def _head_target_column(head_name: str) -> str:
         "vwap_reversion_classifier": "target_vwap_reversion_t1",
     }
     return mapping[head_name]
+
+
+def _available_regression_head_mapping(train_df: pd.DataFrame) -> dict[str, str]:
+    mapping = dict(REGRESSION_HEAD_TO_SIGNAL_FIELD)
+    if "target_downside_from_open_t1" in train_df.columns:
+        mapping.update(RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD)
+    return mapping
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -381,8 +393,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_foundation_logging()
     args = build_parser().parse_args()
+    from .config import CANDIDATE_CONFIG
+
     build_walk_forward_report(
-        config=DEFAULT_CONFIG,
+        config=CANDIDATE_CONFIG,
         train_window_rows=args.train_window_rows,
         test_window_rows=args.test_window_rows,
         step_rows=args.step_rows,

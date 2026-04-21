@@ -375,6 +375,8 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         "downside_regression": "target_downside_t1",
         "grid_pnl_regression": "target_grid_pnl_t1",
     }
+    if "target_downside_from_open_t1" in train_df.columns:
+        regression_targets["downside_from_open_regression"] = "target_downside_from_open_t1"
     for head_name, target_column in regression_targets.items():
         model = build_xgb_regressor(config)
         model.fit(X_train, train_df[target_column])
@@ -383,6 +385,7 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         model.save_model(model_path)
         heads[head_name] = {
             "target_column": target_column,
+            "research_only": head_name == "downside_from_open_regression",
             "model_path": str(model_path),
             "metrics": _evaluate_regression(test_df[target_column], predictions),
         }
@@ -432,6 +435,9 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
 
     metadata = {
         "trained_at": datetime.now().isoformat(timespec="seconds"),
+        "model_slot": config.baseline_model_slot,
+        "baseline_models_dir": str(config.baseline_models_dir),
+        "baseline_metadata_path": str(config.baseline_metadata_path),
         "training_dataset_path": str(config.training_dataset_path),
         "feature_table_path": str(config.feature_table_path),
         "label_targets_path": str(config.label_targets_path),
@@ -474,7 +480,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_foundation_logging()
     build_parser().parse_args()
-    train_baseline_models(DEFAULT_CONFIG)
+    from .config import CANDIDATE_CONFIG
+
+    train_baseline_models(CANDIDATE_CONFIG)
 
 
 if __name__ == "__main__":
