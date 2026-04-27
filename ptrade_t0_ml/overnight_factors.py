@@ -67,6 +67,7 @@ def _standardize_source_frame(path: Path, source_name: str) -> pd.DataFrame:
 
 def _map_session_to_next_trade_date(source_df: pd.DataFrame, trade_dates: pd.Series) -> pd.DataFrame:
     trade_date_values = trade_dates.to_numpy(dtype="datetime64[ns]")
+    first_trade_date = pd.Timestamp(trade_date_values[0]).normalize()
     mapped_dates: list[pd.Timestamp | pd.NaT] = []
     for session_date in source_df["source_date"]:
         search_value = np.datetime64((session_date + pd.Timedelta(days=1)).normalize())
@@ -76,6 +77,11 @@ def _map_session_to_next_trade_date(source_df: pd.DataFrame, trade_dates: pd.Ser
     mapped_df = source_df.copy()
     mapped_df["date"] = mapped_dates
     mapped_df = mapped_df.dropna(subset=["date"]).reset_index(drop=True)
+    # Keep only sessions that can reasonably influence the covered A-share sample.
+    mapped_df = mapped_df[mapped_df["source_date"] >= (first_trade_date - pd.Timedelta(days=14))].copy()
+    # Long China holidays and pre-coverage US history can map multiple sessions to the same China trade day.
+    # For each A-share date, keep the most recent US session only.
+    mapped_df = mapped_df.sort_values(["date", "source_date"]).drop_duplicates(subset=["date"], keep="last")
     mapped_df["date"] = mapped_df["date"].dt.strftime("%Y-%m-%d")
     return mapped_df
 

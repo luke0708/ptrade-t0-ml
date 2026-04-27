@@ -11,7 +11,10 @@ from .io_utils import atomic_write_text
 
 LOGGER = logging.getLogger(__name__)
 
-ML_SIGNAL_VARIABLE_NAME = "ML_SIGNAL_PAYLOAD"
+SUPPORTED_SIGNAL_VARIABLE_NAMES = (
+    "DAILY_SIGNAL",
+    "ML_SIGNAL_PAYLOAD",
+)
 
 
 def _offset_for_position(source: str, lineno: int, col_offset: int) -> int:
@@ -19,29 +22,32 @@ def _offset_for_position(source: str, lineno: int, col_offset: int) -> int:
     return sum(len(line) for line in lines[: lineno - 1]) + col_offset
 
 
-def _locate_signal_assignment_span(template_source: str) -> tuple[int, int]:
+def _locate_signal_assignment_span(template_source: str) -> tuple[str, int, int]:
     module = ast.parse(template_source)
     for node in module.body:
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == ML_SIGNAL_VARIABLE_NAME:
+            if isinstance(target, ast.Name) and target.id in SUPPORTED_SIGNAL_VARIABLE_NAMES:
                 start = _offset_for_position(template_source, node.lineno, node.col_offset)
                 end = _offset_for_position(template_source, node.end_lineno, node.end_col_offset)
-                return start, end
-    raise ValueError(f"Could not find {ML_SIGNAL_VARIABLE_NAME} assignment in template.")
+                return target.id, start, end
+    raise ValueError(
+        "Could not find supported signal assignment in template. "
+        f"Expected one of: {', '.join(SUPPORTED_SIGNAL_VARIABLE_NAMES)}."
+    )
 
 
-def _render_signal_assignment(signal_payload: dict[str, Any]) -> str:
-    return f"{ML_SIGNAL_VARIABLE_NAME} = {pformat(signal_payload, sort_dicts=False, width=100)}"
+def _render_signal_assignment(variable_name: str, signal_payload: dict[str, Any]) -> str:
+    return f"{variable_name} = {pformat(signal_payload, sort_dicts=False, width=100)}"
 
 
 def render_ptrade_strategy_source(
     template_source: str,
     signal_payload: dict[str, Any],
 ) -> str:
-    start, end = _locate_signal_assignment_span(template_source)
-    assignment = _render_signal_assignment(signal_payload)
+    variable_name, start, end = _locate_signal_assignment_span(template_source)
+    assignment = _render_signal_assignment(variable_name, signal_payload)
     return f"{template_source[:start]}{assignment}{template_source[end:]}"
 
 

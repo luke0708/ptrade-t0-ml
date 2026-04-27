@@ -220,6 +220,14 @@ class ProjectConfig:
         return self.analysis_dir / "downside_error_cases.csv"
 
     @property
+    def high_swing_recent_review_path(self) -> Path:
+        return self.analysis_dir / "high_swing_recent_review.csv"
+
+    @property
+    def high_swing_summary_path(self) -> Path:
+        return self.analysis_dir / "high_swing_summary.csv"
+
+    @property
     def head_feature_importance_path(self) -> Path:
         return self.analysis_dir / "head_feature_importance.csv"
 

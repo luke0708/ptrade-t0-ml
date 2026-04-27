@@ -4,6 +4,7 @@ import pandas as pd
 
 from ptrade_t0_ml.baseline_models import (
     _select_decision_threshold,
+    _select_head_feature_columns,
     build_feature_leakage_audit,
     build_training_dataset,
     get_feature_columns,
@@ -13,6 +14,53 @@ from ptrade_t0_ml.config import DEFAULT_CONFIG
 
 
 class BaselineModelTests(unittest.TestCase):
+    def test_select_head_feature_columns_falls_back_when_importance_unavailable(self) -> None:
+        class _NoBoosterModel:
+            pass
+
+        feature_columns = ["feature_a", "feature_b", "feature_c"]
+
+        selected, summary = _select_head_feature_columns(
+            head_name="positive_grid_day_classifier",
+            feature_columns=feature_columns,
+            fitted_model=_NoBoosterModel(),
+        )
+
+        self.assertEqual(selected, feature_columns)
+        self.assertFalse(summary["enabled"])
+        self.assertEqual(summary["selection_reason"], "importance_unavailable")
+
+    def test_select_head_feature_columns_uses_top_gain_ranked_subset_for_configured_head(self) -> None:
+        class _FakeBooster:
+            def get_score(self, importance_type: str = "gain") -> dict[str, float]:
+                self.last_importance_type = importance_type
+                ranked_features = [f"feature_{idx}" for idx in range(1, 31)]
+                score_map = {
+                    feature_name: float(len(ranked_features) - rank_index)
+                    for rank_index, feature_name in enumerate(ranked_features)
+                }
+                score_map["feature_c"] = 100.0
+                score_map["feature_a"] = 99.0
+                score_map["feature_b"] = 98.0
+                return score_map
+
+        class _FakeModel:
+            def get_booster(self) -> _FakeBooster:
+                return _FakeBooster()
+
+        feature_columns = ["feature_a", "feature_b", "feature_c"] + [f"feature_{idx}" for idx in range(1, 31)]
+
+        selected, summary = _select_head_feature_columns(
+            head_name="positive_grid_day_classifier",
+            feature_columns=feature_columns,
+            fitted_model=_FakeModel(),
+        )
+
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(selected[:3], ["feature_c", "feature_a", "feature_b"])
+        self.assertLessEqual(len(selected), len(feature_columns))
+        self.assertEqual(summary["selection_reason"], "top_gain_pruned")
+
     def test_build_training_dataset_merges_on_date(self) -> None:
         feature_df = pd.DataFrame(
             {

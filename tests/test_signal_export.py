@@ -8,6 +8,7 @@ import pandas as pd
 
 from ptrade_t0_ml.config import ProjectConfig
 from ptrade_t0_ml.signal_export import (
+    REGRESSION_HEAD_TO_SIGNAL_FIELD,
     _assert_daily_inference_freshness,
     _apply_soft_dependency_safe_downgrade,
     _collect_daily_inference_dependency_status,
@@ -20,6 +21,12 @@ from ptrade_t0_ml.signal_export import (
 
 
 class SignalExportTests(unittest.TestCase):
+    def test_regression_signal_mapping_includes_downside_from_open_head(self) -> None:
+        self.assertEqual(
+            REGRESSION_HEAD_TO_SIGNAL_FIELD["downside_from_open_regression"],
+            "pred_downside_from_open_t1",
+        )
+
     def test_next_weekday_skips_weekend(self) -> None:
         self.assertEqual(_next_weekday("2026-04-17"), "2026-04-20")
 
@@ -37,6 +44,11 @@ class SignalExportTests(unittest.TestCase):
         trading_dates = {date(2026, 4, 17), date(2026, 4, 20)}
         now_dt = datetime(2026, 4, 20, 16, 0, 0)
         self.assertEqual(_expected_feature_date(now_dt, trading_dates=trading_dates), date(2026, 4, 20))
+
+    def test_expected_feature_date_uses_previous_trading_day_before_complete_day_cutoff(self) -> None:
+        trading_dates = {date(2026, 4, 17), date(2026, 4, 20)}
+        now_dt = datetime(2026, 4, 20, 15, 5, 0)
+        self.assertEqual(_expected_feature_date(now_dt, trading_dates=trading_dates), date(2026, 4, 17))
 
     def test_assert_daily_inference_freshness_rejects_stale_feature_date(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_str:
@@ -212,6 +224,91 @@ class SignalExportTests(unittest.TestCase):
         self.assertTrue(controls["dip_buy_enabled"] is False)
         self.assertEqual(controls["signal_rationale"], "clean_edge_without_hostile_selloff")
 
+    def test_runtime_controls_use_clean_execution_classifier_when_available(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.026,
+            "pred_downside_t1": -0.014,
+            "pred_grid_pnl_t1": 0.002,
+            "pred_clean_execution_day_t1": 0.42,
+            "pred_positive_grid_day_t1": 0.38,
+            "pred_tradable_score_t1": 0.36,
+            "pred_trend_break_risk_t1": 0.12,
+            "pred_hostile_selloff_risk_t1": 0.10,
+            "pred_vwap_reversion_score_t1": 0.28,
+        }
+        thresholds = {
+            "pred_clean_execution_day_t1": 0.30,
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "NORMAL")
+        self.assertEqual(controls["signal_rationale"], "clean_execution_classifier_confirmation")
+        self.assertGreaterEqual(float(controls["position_scale"]), 0.88)
+
+    def test_runtime_controls_fold_old_aggressive_case_into_high_confidence_normal(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.040,
+            "pred_downside_t1": -0.012,
+            "pred_downside_from_open_t1": -0.030,
+            "pred_grid_pnl_t1": 0.004,
+            "pred_clean_execution_day_t1": 0.78,
+            "pred_positive_grid_day_t1": 0.55,
+            "pred_tradable_score_t1": 0.52,
+            "pred_trend_break_risk_t1": 0.04,
+            "pred_hostile_selloff_risk_t1": 0.08,
+            "pred_vwap_reversion_score_t1": 0.35,
+        }
+        thresholds = {
+            "pred_clean_execution_day_t1": 0.60,
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.30,
+            "pred_trend_break_risk_t1": 0.10,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "NORMAL")
+        self.assertEqual(controls["signal_rationale"], "clean_execution_and_strong_range")
+        self.assertAlmostEqual(float(controls["position_scale"]), 0.92)
+        self.assertTrue(controls["dip_buy_enabled"])
+
+    def test_runtime_controls_do_not_let_clean_execution_override_missing_core_edge(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.026,
+            "pred_downside_t1": -0.014,
+            "pred_grid_pnl_t1": 0.002,
+            "pred_clean_execution_day_t1": 0.42,
+            "pred_positive_grid_day_t1": 0.38,
+            "pred_tradable_score_t1": 0.34,
+            "pred_trend_break_risk_t1": 0.12,
+            "pred_hostile_selloff_risk_t1": 0.10,
+            "pred_vwap_reversion_score_t1": 0.28,
+        }
+        thresholds = {
+            "pred_clean_execution_day_t1": 0.30,
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
+        self.assertEqual(controls["signal_rationale"], "positive_grid_without_tradable_confirmation")
+
     def test_runtime_controls_mark_positive_grid_without_tradable_as_safe(self) -> None:
         predictions = {
             "pred_upside_t1": 0.020,
@@ -236,7 +333,219 @@ class SignalExportTests(unittest.TestCase):
 
         self.assertEqual(controls["recommended_mode"], "SAFE")
         self.assertEqual(controls["signal_rationale"], "positive_grid_without_tradable_confirmation")
+
+    def test_runtime_controls_downgrade_shallow_open_downside_even_with_clean_edge(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.024,
+            "pred_downside_t1": -0.016,
+            "pred_downside_from_open_t1": -0.014,
+            "pred_grid_pnl_t1": 0.001,
+            "pred_positive_grid_day_t1": 0.41,
+            "pred_tradable_score_t1": 0.37,
+            "pred_trend_break_risk_t1": 0.12,
+            "pred_hostile_selloff_risk_t1": 0.14,
+            "pred_vwap_reversion_score_t1": 0.28,
+        }
+        thresholds = {
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
         self.assertFalse(controls["dip_buy_enabled"])
+        self.assertEqual(controls["signal_rationale"], "shallow_open_downside_blocks_execution")
+
+    def test_runtime_controls_downgrade_clean_edge_when_sector_and_participation_are_weak(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.024,
+            "pred_downside_t1": -0.016,
+            "pred_downside_from_open_t1": -0.030,
+            "pred_grid_pnl_t1": 0.001,
+            "pred_positive_grid_day_t1": 0.41,
+            "pred_tradable_score_t1": 0.37,
+            "pred_trend_break_risk_t1": 0.08,
+            "pred_hostile_selloff_risk_t1": 0.14,
+            "pred_vwap_reversion_score_t1": 0.28,
+        }
+        thresholds = {
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series(
+            {
+                "grid_step_pct_t1": 0.012,
+                "sec_daily_return": 0.003,
+                "stk_m_open15_volume_ratio": 0.15,
+            }
+        )
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
+        self.assertFalse(controls["dip_buy_enabled"])
+        self.assertEqual(controls["signal_rationale"], "weak_sector_and_participation_damper")
+
+    def test_runtime_controls_downgrade_clean_edge_after_large_prior_day_extension(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.040,
+            "pred_downside_t1": -0.016,
+            "pred_downside_from_open_t1": -0.030,
+            "pred_grid_pnl_t1": 0.004,
+            "pred_clean_execution_day_t1": 0.78,
+            "pred_positive_grid_day_t1": 0.55,
+            "pred_tradable_score_t1": 0.52,
+            "pred_trend_break_risk_t1": 0.04,
+            "pred_hostile_selloff_risk_t1": 0.08,
+            "pred_vwap_reversion_score_t1": 0.35,
+        }
+        thresholds = {
+            "pred_clean_execution_day_t1": 0.60,
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.30,
+            "pred_trend_break_risk_t1": 0.10,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series(
+            {
+                "grid_step_pct_t1": 0.012,
+                "daily_return": 0.08,
+                "sec_daily_return": 0.08,
+                "stk_m_open15_volume_ratio": 0.22,
+            }
+        )
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
+        self.assertFalse(controls["dip_buy_enabled"])
+        self.assertEqual(controls["signal_rationale"], "prior_day_extension_damper")
+
+    def test_runtime_controls_downgrade_clean_confirmation_when_reversion_is_too_weak(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.026,
+            "pred_downside_t1": -0.014,
+            "pred_downside_from_open_t1": -0.030,
+            "pred_grid_pnl_t1": 0.002,
+            "pred_clean_execution_day_t1": 0.42,
+            "pred_positive_grid_day_t1": 0.38,
+            "pred_tradable_score_t1": 0.36,
+            "pred_trend_break_risk_t1": 0.12,
+            "pred_hostile_selloff_risk_t1": 0.10,
+            "pred_vwap_reversion_score_t1": 0.18,
+        }
+        thresholds = {
+            "pred_clean_execution_day_t1": 0.30,
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series(
+            {
+                "grid_step_pct_t1": 0.012,
+                "daily_return": 0.00,
+                "sec_daily_return": 0.03,
+                "stk_m_open15_volume_ratio": 0.22,
+            }
+        )
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
+        self.assertFalse(controls["dip_buy_enabled"])
+        self.assertEqual(controls["signal_rationale"], "weak_reversion_clean_confirmation_damper")
+
+    def test_runtime_controls_keep_normal_when_open_downside_is_deep_enough(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.024,
+            "pred_downside_t1": -0.016,
+            "pred_downside_from_open_t1": -0.023,
+            "pred_grid_pnl_t1": 0.001,
+            "pred_positive_grid_day_t1": 0.41,
+            "pred_tradable_score_t1": 0.37,
+            "pred_trend_break_risk_t1": 0.12,
+            "pred_hostile_selloff_risk_t1": 0.14,
+            "pred_vwap_reversion_score_t1": 0.28,
+        }
+        thresholds = {
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.35,
+            "pred_trend_break_risk_t1": 0.30,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "NORMAL")
+        self.assertEqual(controls["signal_rationale"], "clean_edge_without_hostile_selloff")
+        self.assertTrue(controls["dip_buy_enabled"])
+
+    def test_runtime_controls_allow_near_clean_edge_as_low_confidence_normal(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.022,
+            "pred_downside_t1": -0.018,
+            "pred_downside_from_open_t1": -0.028,
+            "pred_grid_pnl_t1": -0.006,
+            "pred_positive_grid_day_t1": 0.341,
+            "pred_tradable_score_t1": 0.258,
+            "pred_trend_break_risk_t1": 0.08,
+            "pred_hostile_selloff_risk_t1": 0.12,
+            "pred_vwap_reversion_score_t1": 0.22,
+        }
+        thresholds = {
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.30,
+            "pred_trend_break_risk_t1": 0.10,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "NORMAL")
+        self.assertEqual(controls["signal_rationale"], "near_clean_edge_low_confidence")
+        self.assertFalse(controls["dip_buy_enabled"])
+        self.assertAlmostEqual(float(controls["position_scale"]), 0.68)
+
+    def test_runtime_controls_do_not_relax_near_clean_edge_when_grid_pnl_too_negative(self) -> None:
+        predictions = {
+            "pred_upside_t1": 0.022,
+            "pred_downside_t1": -0.018,
+            "pred_downside_from_open_t1": -0.028,
+            "pred_grid_pnl_t1": -0.02,
+            "pred_positive_grid_day_t1": 0.341,
+            "pred_tradable_score_t1": 0.258,
+            "pred_trend_break_risk_t1": 0.08,
+            "pred_hostile_selloff_risk_t1": 0.12,
+            "pred_vwap_reversion_score_t1": 0.22,
+        }
+        thresholds = {
+            "pred_positive_grid_day_t1": 0.35,
+            "pred_tradable_score_t1": 0.30,
+            "pred_trend_break_risk_t1": 0.10,
+            "pred_hostile_selloff_risk_t1": 0.25,
+            "pred_vwap_reversion_score_t1": 0.25,
+        }
+        latest_feature_row = pd.Series({"grid_step_pct_t1": 0.012})
+
+        controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
+
+        self.assertEqual(controls["recommended_mode"], "SAFE")
+        self.assertEqual(controls["signal_rationale"], "insufficient_edge")
 
     def test_load_baseline_metadata_requires_promote_when_only_candidate_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_str:

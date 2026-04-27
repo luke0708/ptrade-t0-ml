@@ -9,11 +9,355 @@
 
 ## Snapshot
 
-- Date: `2026-04-16`
+- Date: `2026-04-24`
 - Workstream: `300661` long-history minute-data ML system
 - Overall status: `in_progress`
 
+## Current Working Node
+
+Current production and candidate are aligned at the same stable node:
+
+- training time: `2026-04-23T13:43:11`
+- production model: `models/baseline_stock_only/`
+- candidate model: `models/baseline_candidate/`
+- exported model version: `baseline_multihead_20260423_134311`
+- `positive_grid_day_classifier`: top `64` selected features
+- `tradable_classifier`: top `96` selected features
+- controller mode policy:
+  - `AGGRESSIVE` is disabled for now
+  - high-confidence executable days map to `NORMAL`
+  - hostile selloff risk can force `SAFE`
+
+Latest walk-forward summary:
+
+- `NORMAL` rows: `51`
+- `NORMAL grid_pnl_mean`: `0.004650`
+- `SAFE` rows: `1334`
+- `SAFE grid_pnl_mean`: `-0.004308`
+- losing / winning windows: `3 / 19`
+
+Latest holdout replay summary:
+
+- `NORMAL` rows: `19`
+- `NORMAL grid_pnl_mean`: `0.000010`
+- `SAFE` rows: `412`
+- `SAFE grid_pnl_mean`: `-0.006250`
+
+Latest daily signal snapshot:
+
+- feature date: `2026-04-24`
+- signal for date: `2026-04-27`
+- recommended mode: `SAFE`
+- rationale: `hostile_selloff_blocks_execution`
+
+Current interpretation:
+
+- the system now has a conservative production version that can be used for daily PTrade export
+- the main weakness is low open frequency, not the daily production workflow
+- further research should happen in candidate first, then be promoted only after walk-forward review
+
+## Next Plan
+
+1. Keep daily production stable:
+   - run daily backfill / foundation / feature / export after the close
+   - do not retrain on ordinary weekdays
+2. Improve the two main execution heads:
+   - `positive_grid_day_classifier`
+   - `tradable_classifier`
+3. Reduce false `SAFE` without breaking stability:
+   - target a higher `NORMAL` count
+   - keep walk-forward close to the current `3 / 19` failure / win profile
+4. Add targeted `300661` context:
+   - high-open-low-close regime
+   - overnight / US semiconductor context
+   - early weak-volume and failed-reversion patterns
+5. Avoid near-term low-value work:
+   - do not keep making tiny threshold relaxations unless diagnostics show a clear failure cohort
+   - do not move complex inference into PTrade
+   - do not promote a candidate just because single holdout improves
+
 ## Recent Updates
+
+### High-Swing Opportunity Split Plan
+
+Status: `stage_1_done`
+
+We identified that recent large-amplitude days are not automatically good `NORMAL` days.
+
+Observed pattern:
+
+- large amplitude often comes from high-open fade or early hostile selloff
+- current controller correctly keeps `dip_buy_enabled = False` on many of these days
+- however, the same days may still contain useful high-sell / rebuy windows
+
+Upgrade plan:
+
+1. Stage 1 diagnostic only:
+   - build `analysis/high_swing_recent_review.csv`
+   - review recent high-swing days
+   - separate high-sell opportunity from dip-buy repair opportunity
+   - explain why current model marked each day as `SAFE`
+2. Stage 2 candidate labels:
+   - `target_high_sell_window_t1`
+   - `target_dip_repair_window_t1`
+   - train candidate heads only after the diagnostic confirms value
+3. Stage 3 controller split:
+   - keep PTrade simple
+   - continue exporting offline JSON
+   - use separate execution switches such as `high_sell_enabled`, `dip_buy_enabled`, and `dip_rebuy_enabled`
+
+Important constraint:
+
+- do not loosen production `SAFE` thresholds blindly
+- do not convert high amplitude into automatic dip-buy permission
+
+Stage 1 implementation:
+
+- added `analyze_high_swing_opportunities.py`
+- added `ptrade_t0_ml/high_swing_analysis.py`
+- output files:
+  - `analysis/high_swing_recent_review.csv`
+  - `analysis/high_swing_summary.csv`
+
+Initial result with `lookback_days = 120` and `swing_threshold = 0.055`:
+
+- high-swing rows: `25`
+- `SAFE` high-swing rows: `22`
+- `NORMAL` high-swing rows: `2`
+- all high-swing `target_grid_pnl_mean`: `-0.013305`
+- same-day high-sell-window proxy rows: `19`
+- next-day high-sell-window proxy rate: `0.320000`
+- next-day dip-repair-window proxy rate: `0.080000`
+
+Interpretation:
+
+- the current model is not simply missing all large-amplitude opportunities
+- recent high-swing days are still poor for the current pessimistic grid / dip-buy label
+- the more promising split is high-sell-window detection, not broad dip-buy relaxation
+- stage 2 should prioritize a candidate `target_high_sell_window_t1` before a more aggressive dip-repair label
+
+### 399006 Index Daily Fallback Expansion
+
+Status: `done`
+
+We fixed the Mac daily backfill path for `399006.csv`.
+
+Problem observed on `2026-04-27`:
+
+- `300661` minute data reached `2026-04-27`
+- `512480` reached `2026-04-27` through Tencent fallback
+- `399006` stayed stale at `2026-04-24`
+- daily export therefore forced `SAFE` with:
+  - `signal_status = experimental_baseline_soft_degraded`
+  - `signal_rationale = soft_dependency_degraded_to_safe`
+
+Fix:
+
+- expanded the `sz399006` fallback chain in `daily_backfill_data_mac.py`
+- added Tencent generic daily fallback:
+  - `ak.stock_zh_a_hist_tx(symbol="sz399006")`
+- added Tencent index-specific fallback:
+  - `ak.stock_zh_index_daily_tx(symbol="sz399006")`
+- added Eastmoney index daily fallbacks:
+  - `ak.stock_zh_index_daily_em(symbol="sz399006")`
+  - `ak.index_zh_a_hist(symbol="399006")`
+- added Chinese-column daily normalization for fallback frames
+
+Validation:
+
+- `python -m unittest tests.test_daily_backfill_data_mac`
+- `python -m py_compile daily_backfill_data_mac.py tests/test_daily_backfill_data_mac.py`
+
+### PTrade Template Export Compatibility Fix
+
+Status: `done`
+
+The PTrade template variable name was updated from `ML_SIGNAL_PAYLOAD` to `DAILY_SIGNAL`.
+This broke the export pipeline because the exporter still only searched for
+`ML_SIGNAL_PAYLOAD = {...}`.
+
+Completed fix:
+
+- `ptrade_strategy_export.py` now supports both:
+  - `DAILY_SIGNAL`
+  - `ML_SIGNAL_PAYLOAD`
+- current templates prefer `DAILY_SIGNAL`
+- old generated or archived templates remain backward compatible
+
+This means updating `data/ptrade_300661.py` no longer breaks the daily
+`export_ml_daily_signal.py -> ptrade_300661_YYYYMMDD.py` flow just because the
+embedded signal variable name changed.
+
+### Head-Specific Feature Pruning Comparison
+
+Status: `done`
+
+We finished a focused training-side experiment on the two most important execution-confirmation heads:
+
+- `positive_grid_day_classifier`
+- `tradable_classifier`
+
+Instead of changing thresholds again, we pruned each head down to its own high-gain feature subset and
+compared three candidate variants:
+
+- dual pruning:
+  - `positive_grid -> top 80`
+  - `tradable -> top 96`
+- tradable-only pruning
+- positive-grid-only pruning
+
+Result summary:
+
+- dual pruning is currently the best of the three
+- tradable-only pruning weakens controller quality
+- positive-grid-only pruning is worse than dual pruning and does not hold up in walk-forward
+
+Initial dual-pruning candidate facts:
+
+- `positive_grid_day_classifier` selected features: `80`
+- `tradable_classifier` selected features: `96`
+- walk-forward:
+  - `losing_windows = 8`
+  - `winning_windows = 14`
+  - `SAFE mean = -0.003899`
+  - `NORMAL mean = -0.004269`
+- holdout replay:
+  - `SAFE mean = -0.006602`
+  - `NORMAL mean = -0.001308`
+
+Comparison snapshots:
+
+- dual pruning:
+  - `losing/winning = 8/14`
+  - `SAFE mean = -0.003899`
+  - `NORMAL mean = -0.004269`
+- tradable-only pruning:
+  - `losing/winning = 7/13`
+  - `SAFE mean = -0.003829`
+  - `NORMAL mean = -0.005494`
+- positive-grid-only pruning:
+  - `losing/winning = 9/13`
+  - `SAFE mean = -0.003479`
+  - `NORMAL mean = -0.008212`
+
+Interpretation:
+
+- head-specific pruning is directionally useful
+- the gain comes from keeping both pruned heads together, not from pruning only one of them
+- this candidate is better than the recent unpruned research baseline, but still not strong enough to justify an automatic promote
+
+### Head-Count Tuning On Dual Pruning
+
+Status: `done`
+
+We then tuned the dual-pruning feature counts instead of changing labels or controller thresholds again.
+
+Compared candidate variants:
+
+- current baseline before tuning:
+  - `positive_grid = 80`
+  - `tradable = 96`
+- tuned candidate:
+  - `positive_grid = 64`
+  - `tradable = 96`
+- alternative tested and rejected:
+  - `positive_grid = 80`
+  - `tradable = 80`
+
+Result summary:
+
+- `64/96` is currently the best training-side variant
+- `80/80` weakens controller stability and should not be kept
+
+Key comparison:
+
+- `80/96`
+  - `winning/losing = 14/8`
+  - `SAFE mean = -0.003899`
+  - `NORMAL mean = -0.004269`
+- `64/96`
+  - `winning/losing = 16/6`
+  - `SAFE mean = -0.003987`
+  - `NORMAL mean = -0.003234`
+- `80/80`
+  - `winning/losing = 13/9`
+  - `SAFE mean = -0.003653`
+  - `NORMAL mean = -0.007229`
+
+Interpretation:
+
+- `positive_grid_day_classifier` benefits from stronger pruning than before
+- `tradable_classifier` still performs best around `96` selected features
+- the new research baseline should move forward as:
+  - `positive_grid = 64`
+  - `tradable = 96`
+
+### Weak Environment Confirmation Damper
+
+Status: `done`
+
+We then added one small controller-side damper on top of the new `64/96` training baseline.
+
+Rule:
+
+- if a day is otherwise close to `clean_edge`
+- but both of the following are weak:
+  - `sec_daily_return < 0.015`
+  - `stk_m_open15_volume_ratio < 0.17`
+- then downgrade the day back to `SAFE`
+
+We also removed the standalone `AGGRESSIVE` branch and folded the old aggressive case into a stronger
+high-confidence `NORMAL`.
+
+Current effect:
+
+- walk-forward:
+  - `losing/winning = 5/17`
+  - `SAFE mean = -0.003983`
+  - `NORMAL mean = -0.003878`
+- holdout replay:
+  - `SAFE mean = -0.006442`
+  - `NORMAL mean = 0.000271`
+- `AGGRESSIVE = 0`
+
+Interpretation:
+
+- this damper improves window stability further
+- it reduces false-positive `NORMAL` days sharply
+- the system now behaves more like a conservative execution filter than an aggressive opportunity seeker
+
+### Clean Confirmation False-Positive Dampers
+
+Status: `done`
+
+We found that the remaining bad `NORMAL` cases were concentrated in the
+`clean_execution_classifier_confirmation` path rather than in the plain `clean_edge_without_hostile_selloff`
+path.
+
+Two minimal dampers were added:
+
+- prior-day extension damper:
+  - if `daily_return > 0.06`, downgrade otherwise clean `NORMAL` candidates to `SAFE`
+- weak reversion clean-confirmation damper:
+  - if `clean_execution` confirms but `pred_vwap_reversion_score_t1 < 0.20`, downgrade to `SAFE`
+
+Current effect on top of the `64/96` training baseline and weak environment damper:
+
+- walk-forward:
+  - `losing/winning = 3/19`
+  - `SAFE mean = -0.004308`
+  - `NORMAL mean = 0.004650`
+  - `NORMAL rows = 51`
+- holdout replay:
+  - `SAFE mean = -0.006250`
+  - `NORMAL mean = 0.000010`
+  - `NORMAL rows = 19`
+
+Interpretation:
+
+- `NORMAL` is now much more selective
+- the remaining `NORMAL` bucket is finally positive in walk-forward
+- this is the strongest research candidate so far, but it is conservative and should be promoted only if low trade frequency is acceptable
 
 ### Daily / Weekly Runbook Unified
 
@@ -106,10 +450,10 @@ Status: `done`
 
 The following design docs now exist and are the source of truth:
 
-- [minute_feature_schema.md](</E:/AI炒股/机器学习/docs/minute_feature_schema.md>)
-- [label_definition.md](</E:/AI炒股/机器学习/docs/label_definition.md>)
-- [model_spec.md](</E:/AI炒股/机器学习/docs/model_spec.md>)
-- [ptrade_signal_contract.md](</E:/AI炒股/机器学习/docs/ptrade_signal_contract.md>)
+- [minute_feature_schema.md](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/minute_feature_schema.md>)
+- [label_definition.md](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/label_definition.md>)
+- [model_spec.md](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/model_spec.md>)
+- [ptrade_signal_contract.md](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/docs/ptrade_signal_contract.md>)
 
 ### Long-History Primary Minute Source
 
@@ -117,7 +461,7 @@ Status: `done`
 
 Primary stock minute source is now:
 
-- [300661_SZ_1m_ptrade.csv](</E:/AI炒股/机器学习/data/300661_SZ_1m_ptrade.csv>)
+- [300661_SZ_1m_ptrade.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/300661_SZ_1m_ptrade.csv>)
 
 Known facts:
 
@@ -133,15 +477,15 @@ Status: `done`
 
 Reserved daily environment paths:
 
-- [300661.csv](</E:/AI炒股/机器学习/data/300661.csv>)
-- [399006.csv](</E:/AI炒股/机器学习/data/399006.csv>)
-- [512480.csv](</E:/AI炒股/机器学习/data/512480.csv>)
+- [300661.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/300661.csv>)
+- [399006.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/399006.csv>)
+- [512480.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/512480.csv>)
 
 Available optional external minute enhancement files:
 
-- [300661_5m.csv](</E:/AI炒股/机器学习/data/300661_5m.csv>)
-- [399006_5m.csv](</E:/AI炒股/机器学习/data/399006_5m.csv>)
-- [512480_5m.csv](</E:/AI炒股/机器学习/data/512480_5m.csv>)
+- [300661_5m.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/300661_5m.csv>)
+- [399006_5m.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/399006_5m.csv>)
+- [512480_5m.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/512480_5m.csv>)
 
 Important caveat:
 
@@ -156,8 +500,8 @@ Status: `done`
 
 Existing files:
 
-- [300661_regression_dataset.csv](</E:/AI炒股/机器学习/data/300661_regression_dataset.csv>)
-- [300661_regression_dataset_with_minute_intersection.csv](</E:/AI炒股/机器学习/data/300661_regression_dataset_with_minute_intersection.csv>)
+- [300661_regression_dataset.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/300661_regression_dataset.csv>)
+- [300661_regression_dataset_with_minute_intersection.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/300661_regression_dataset_with_minute_intersection.csv>)
 
 These are useful historical artifacts, but they are **not yet the final production-grade training base**, because they were built before the long-history `1m` source became the primary minute source.
 
@@ -176,9 +520,9 @@ Needed deliverables:
 
 Completed outputs:
 
-- [300661_SZ_1m_canonical.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_1m_canonical.csv>)
-- [300661_SZ_1m_daily_summary.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_1m_daily_summary.csv>)
-- [300661_SZ_1m_audit.json](</E:/AI炒股/机器学习/data/foundation/300661_SZ_1m_audit.json>)
+- [300661_SZ_1m_canonical.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_1m_canonical.csv>)
+- [300661_SZ_1m_daily_summary.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_1m_daily_summary.csv>)
+- [300661_SZ_1m_audit.json](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_1m_audit.json>)
 
 Validated facts from the audit:
 
@@ -214,10 +558,10 @@ Needed deliverables:
 
 Completed first-slice outputs:
 
-- [build_label_engine.py](</E:/AI炒股/机器学习/build_label_engine.py>)
-- [label_engine.py](</E:/AI炒股/机器学习/ptrade_t0_ml/label_engine.py>)
-- [300661_SZ_label_targets.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_label_targets.csv>)
-- [300661_SZ_label_audit.json](</E:/AI炒股/机器学习/data/foundation/300661_SZ_label_audit.json>)
+- [build_label_engine.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/build_label_engine.py>)
+- [label_engine.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/label_engine.py>)
+- [300661_SZ_label_targets.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_label_targets.csv>)
+- [300661_SZ_label_audit.json](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_label_audit.json>)
 
 Completed first-slice labels:
 
@@ -268,10 +612,10 @@ Needed deliverables:
 
 Completed first-slice outputs:
 
-- [build_feature_engine.py](</E:/AI炒股/机器学习/build_feature_engine.py>)
-- [feature_engine.py](</E:/AI炒股/机器学习/ptrade_t0_ml/feature_engine.py>)
-- [300661_SZ_feature_table.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_feature_table.csv>)
-- [300661_SZ_feature_audit.json](</E:/AI炒股/机器学习/data/foundation/300661_SZ_feature_audit.json>)
+- [build_feature_engine.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/build_feature_engine.py>)
+- [feature_engine.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/feature_engine.py>)
+- [300661_SZ_feature_table.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_feature_table.csv>)
+- [300661_SZ_feature_audit.json](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_feature_audit.json>)
 
 Completed first-slice feature groups:
 
@@ -316,18 +660,18 @@ Needed deliverables:
 
 Completed first-slice outputs:
 
-- [train_baseline_models.py](</E:/AI炒股/机器学习/train_baseline_models.py>)
-- [baseline_models.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_models.py>)
-- [analyze_baseline_quality.py](</E:/AI炒股/机器学习/analyze_baseline_quality.py>)
-- [analyze_walk_forward.py](</E:/AI炒股/机器学习/analyze_walk_forward.py>)
-- [analyze_downside_targets.py](</E:/AI炒股/机器学习/analyze_downside_targets.py>)
-- [baseline_quality.py](</E:/AI炒股/机器学习/ptrade_t0_ml/baseline_quality.py>)
-- [walk_forward_analysis.py](</E:/AI炒股/机器学习/ptrade_t0_ml/walk_forward_analysis.py>)
-- [downside_target_analysis.py](</E:/AI炒股/机器学习/ptrade_t0_ml/downside_target_analysis.py>)
-- [300661_SZ_training_dataset.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_training_dataset.csv>)
-- [baseline_stock_only_metadata.json](</E:/AI炒股/机器学习/models/baseline_stock_only/baseline_stock_only_metadata.json>)
-- baseline model files under [baseline_stock_only](</E:/AI炒股/机器学习/models/baseline_stock_only>)
-- baseline quality analysis outputs under [analysis](</E:/AI炒股/机器学习/analysis>)
+- [train_baseline_models.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/train_baseline_models.py>)
+- [baseline_models.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/baseline_models.py>)
+- [analyze_baseline_quality.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analyze_baseline_quality.py>)
+- [analyze_walk_forward.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analyze_walk_forward.py>)
+- [analyze_downside_targets.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analyze_downside_targets.py>)
+- [baseline_quality.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/baseline_quality.py>)
+- [walk_forward_analysis.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/walk_forward_analysis.py>)
+- [downside_target_analysis.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/downside_target_analysis.py>)
+- [300661_SZ_training_dataset.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_training_dataset.csv>)
+- [baseline_stock_only_metadata.json](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/models/baseline_stock_only/baseline_stock_only_metadata.json>)
+- baseline model files under [baseline_stock_only](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/models/baseline_stock_only>)
+- baseline quality analysis outputs under [analysis](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/analysis>)
 
 Completed first-slice heads:
 
@@ -473,10 +817,10 @@ Needed deliverables:
 
 Completed first-slice outputs:
 
-- [export_ml_daily_signal.py](</E:/AI炒股/机器学习/export_ml_daily_signal.py>)
-- [signal_export.py](</E:/AI炒股/机器学习/ptrade_t0_ml/signal_export.py>)
-- [ml_daily_signal.json](</E:/AI炒股/机器学习/data/ml_daily_signal.json>)
-- [ml_daily_signal.csv](</E:/AI炒股/机器学习/data/ml_daily_signal.csv>)
+- [export_ml_daily_signal.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/export_ml_daily_signal.py>)
+- [signal_export.py](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/signal_export.py>)
+- [ml_daily_signal.json](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/ml_daily_signal.json>)
+- [ml_daily_signal.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/ml_daily_signal.csv>)
 
 Validated facts from the latest signal export:
 
@@ -537,10 +881,10 @@ Mitigation:
 
 - keep Phase 1 and Phase 2 fully anchored to:
 - keep Phase 3 first slice anchored to:
-  - [300661_SZ_1m_canonical.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_1m_canonical.csv>)
-  - [300661_SZ_1m_daily_summary.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_1m_daily_summary.csv>)
-  - [300661_SZ_label_targets.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_label_targets.csv>)
-  - [300661_SZ_feature_table.csv](</E:/AI炒股/机器学习/data/foundation/300661_SZ_feature_table.csv>)
+  - [300661_SZ_1m_canonical.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_1m_canonical.csv>)
+  - [300661_SZ_1m_daily_summary.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_1m_daily_summary.csv>)
+  - [300661_SZ_label_targets.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_label_targets.csv>)
+  - [300661_SZ_feature_table.csv](</Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/data/foundation/300661_SZ_feature_table.csv>)
 - continue treating `300661.csv` as non-authoritative until it is rebuilt from a trusted source
 
 ### Risk 3. Overbuilding Before Baseline
@@ -1015,3 +1359,308 @@ Purpose:
 
 - prevent the downstream chain from exporting a next-day signal off stale inputs
 - make “daily inference correctness” observable from the backfill stage instead of only noticing it at `export_ml_daily_signal.py`
+
+## Minute-Day Completeness Guard
+
+Updated [daily_backfill_data_mac.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/daily_backfill_data_mac.py) again so minute backfill success is no longer judged by date alone.
+
+Current behavior:
+
+- `300661_SZ_1m_ptrade.csv` still counts as a hard dependency
+- but the latest trading day is no longer treated as a binary “240 bars or fail” gate
+- small tail-bar noise is now tolerated up to `2` missing minute bars
+- when missing bars are within tolerance, the script logs a warning and continues
+- when missing bars exceed tolerance, the script fails with:
+  - `target_date`
+  - `observed_rows`
+  - `expected_rows`
+  - `missing_count`
+  - a preview of `missing_timestamps`
+
+Reasoning:
+
+- a latest timestamp such as `15:00:00` can still hide an incomplete day
+- this happened in practice with `2026-04-21 14:58:00` and `14:59:00` missing
+- Sina / Eastmoney minute fallback can intermittently miss the final 1-2 bars before close
+- this is acceptable noise for current training / inference, but larger gaps should still block the pipeline
+
+## Overnight Mapping Dedup Fix
+
+Updated [ptrade_t0_ml/overnight_factors.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/overnight_factors.py) so overnight factor alignment no longer fails on long China holiday gaps or pre-sample US history.
+
+Current behavior:
+
+- US sessions are first mapped to the next available A-share trading day
+- when multiple US sessions map to the same China trade date, only the most recent session is kept
+- very old pre-coverage US history is trimmed so it does not collapse onto the first A-share sample date
+
+Reasoning:
+
+- the earlier version produced duplicate `date` keys in both semiconductor and Nasdaq mapped frames
+- this prevented `overnight_factors.csv` from being rebuilt and meant overnight features were not actually merged into training
+- after the fix, the real overnight factor file builds successfully with coverage `2017-06-06 -> 2026-04-20`
+
+## Clean Execution Composite Head
+
+We added a new controller-oriented composite label and candidate classifier:
+
+- label:
+  - `target_clean_execution_day_t1`
+- model head:
+  - `clean_execution_day_classifier`
+- signal field:
+  - `pred_clean_execution_day_t1`
+
+Current label definition:
+
+- `positive_grid_day = 1`
+- `tradable_score = 1`
+- `hostile_selloff_risk = 0`
+
+Why this was added:
+
+- overnight and regime features improved several individual heads
+- but the controller still relied on combining multiple independent heads with heuristics
+- walk-forward results continued to show `NORMAL` underperforming `SAFE`
+- this suggests the remaining problem is not only missing features, but also that the execution decision itself needs a direct supervised target
+
+Current implementation status:
+
+- label generation now emits `target_clean_execution_day_t1`
+- candidate training now fits `clean_execution_day_classifier`
+- the candidate-side controller in [signal_export.py](/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml/ptrade_t0_ml/signal_export.py) now uses this head as a high-confidence confirmer for `NORMAL` / `AGGRESSIVE`, while still requiring the old `positive_grid + tradable` base edge
+- older production metadata remains compatible because the controller falls back to the previous multi-head heuristic when the new head is absent
+
+Latest candidate-side findings:
+
+- the first controller wiring was too strict and collapsed the single holdout slice to `NORMAL = 0`
+- after changing `clean_execution_day_classifier` into a confirmer instead of an absolute gate, the holdout slice recovered to:
+  - `SAFE = 349`
+  - `NORMAL = 80`
+  - `AGGRESSIVE = 0`
+- the refreshed walk-forward result still does not justify promotion:
+  - `losing_windows = 12`
+  - `winning_windows = 10`
+  - `SAFE mean = -0.003873`
+  - `NORMAL mean = -0.004260`
+- the new head is not useless, but its current walk-forward quality is still weak:
+  - `clean_execution_day_classifier` average AP `0.1905`
+  - average ROC AUC `0.5314`
+  - average recommended precision `0.1483`
+  - average recommended recall `0.1517`
+
+Follow-up label iteration results:
+
+- `v2` broadened the label to:
+  - `positive_grid_day = 1`
+  - `tradable_score = 1`
+  - `hostile_selloff_risk = 0`
+- this increased label coverage to `28.0%`, but walk-forward became worse:
+  - `losing_windows = 14`
+  - `winning_windows = 8`
+  - `NORMAL mean = -0.004543`
+
+- `v3` then added an open-anchor downside guard:
+  - `target_downside_from_open_t1 >= -0.025`
+- this reduced label coverage to `18.6%`
+- `v3` is slightly better than `v2`, but still not good enough:
+  - `losing_windows = 13`
+  - `winning_windows = 9`
+  - `SAFE mean = -0.003873`
+  - `NORMAL mean = -0.004403`
+  - `clean_execution_day_classifier` average AP `0.2513`
+  - average ROC AUC `0.5118`
+
+Current conclusion:
+
+- the composite clean-execution label is still not the main bottleneck breakthrough
+- broadening or tightening that label alone does not make `NORMAL` stable enough
+- the next optimization step should move back to controller structure or to a different target family, not keep iterating this one label in isolation
+
+## Downside-From-Open Controller Gate
+
+We then stopped iterating the clean label in isolation and moved back to controller structure.
+
+Key finding:
+
+- `pred_downside_from_open_t1` is not a good "deep selloff veto"
+- for `300661`, it behaves more like a "minimum usable opening range" signal
+- candidate-side offline simulation showed that days with **too shallow** predicted downside-from-open were the worse `NORMAL` slice
+
+Candidate controller change:
+
+- if:
+  - `pred_positive_grid_day_t1_on = 1`
+  - `pred_tradable_score_t1_on = 1`
+  - `pred_hostile_selloff_risk_t1_on = 0`
+  - but `pred_downside_from_open_t1 > -0.02`
+- then downgrade that candidate `NORMAL` / `AGGRESSIVE` day back to `SAFE`
+
+Result:
+
+- holdout became more conservative:
+  - `NORMAL = 49`
+- but walk-forward improved materially:
+  - `losing_windows = 9`
+  - `winning_windows = 13`
+  - `SAFE mean = -0.004173`
+  - `NORMAL mean = -0.002831`
+  - `NORMAL_OR_AGGRESSIVE mean = -0.002910`
+
+Interpretation:
+
+- this is the first recent candidate-side controller change that clearly flips walk-forward window balance back to the positive side
+- the price paid is fewer open-position days, but the remaining `NORMAL` slice is meaningfully cleaner
+
+Threshold refinement:
+
+- we then tightened that gate from `-0.0200` to `-0.0225`
+- single holdout became more conservative, but walk-forward improved again:
+  - `losing_windows = 7`
+  - `winning_windows = 15`
+  - `SAFE mean = -0.004071`
+  - `NORMAL mean = -0.003312`
+  - `NORMAL_OR_AGGRESSIVE mean = -0.003439`
+- current candidate mode counts in walk-forward:
+  - `SAFE = 1263`
+  - `NORMAL = 116`
+  - `AGGRESSIVE = 3`
+
+Current interpretation:
+
+- this is the strongest candidate-side controller version so far if the priority is stability
+- it still reduces open-position frequency, so it is better described as a "stable hangable candidate" than a final high-frequency version
+
+## Complete-Day Cutoff
+
+We also tightened the daily runtime contract around a complete-trading-day cutoff.
+
+Current rule:
+
+- use `15:10` as the unified complete-day cutoff
+- before `15:10`, both backfill and inference only recognize the previous complete trading day
+- after `15:10`, exporting the next trading-day strategy requires the current trading day to be complete
+
+Practical effect:
+
+- morning / intraday runs no longer stitch partial same-day minute data into the main runtime files
+- `export_ml_daily_signal.py` in the morning will only allow a signal based on the previous trading day
+- after the cutoff, stale same-day data becomes a hard failure again
+
+## Daily Export Bug Fix
+
+We found and fixed a production export bug in `signal_export.py`.
+
+Issue:
+
+- the promoted production model already contained `downside_from_open_regression`
+- but daily signal export did not map that head into `pred_downside_from_open_t1`
+- as a result, the runtime controller could not actually consume the new downside-from-open gate in exported `ml_daily_signal.json`
+
+Fix:
+
+- add `downside_from_open_regression -> pred_downside_from_open_t1` into the daily regression signal mapping
+- add a regression test in `tests/test_signal_export.py`
+
+Interpretation:
+
+- the recent walk-forward gains from the downside-from-open gate were valid in research
+- but the live daily export path needed this bug fix before production signals could truly use the same gate
+
+## Near-Edge Controller Relaxation
+
+We then tested a very small controller relaxation aimed at increasing open-position frequency
+without giving back the current walk-forward stability.
+
+Change:
+
+- keep the existing `clean_edge` logic untouched
+- add a lower-confidence `near_clean_edge_low_confidence` branch
+- only allow it when:
+  - `positive_grid` is close to threshold
+  - `tradable` is close to threshold
+  - `clean_execution` is not already confirmed
+  - `hostile_selloff` is low
+  - `trend_break` is low
+  - `downside_from_open` is deep enough
+  - predicted upside is not too small
+  - predicted grid pnl is not too negative
+
+Result:
+
+- walk-forward still held at:
+  - `losing_windows = 7`
+  - `winning_windows = 15`
+- mode counts became:
+  - `SAFE = 1255`
+  - `NORMAL = 124`
+  - `AGGRESSIVE = 3`
+  - `OFF = 4`
+- compared with the previous stricter version:
+  - `NORMAL` increased from `116` to `124`
+  - `NORMAL mean` improved from `-0.003312` to `-0.003015`
+  - `SAFE mean` moved slightly from `-0.004071` to `-0.004106`
+
+Interpretation:
+
+- this relaxation did not break the current best `15/7` walk-forward stability
+- it only modestly increases `NORMAL` frequency, which is the right shape for now
+- single holdout is still not strong enough to justify a large opening-up of the controller
+
+## Positive-Grid Margin Micro-Test
+
+We also tested a narrower controller experiment:
+
+- keep the same near-clean-edge branch
+- only widen the `positive_grid` near-edge margin from `0.015` to `0.025`
+
+Outcome:
+
+- no material change in walk-forward summary
+- no material change in holdout summary
+- `losing_windows / winning_windows` stayed effectively unchanged
+
+Decision:
+
+- revert this micro-change
+- do not continue trying to squeeze more openings out of the current controller with tiny
+  `positive_grid` margin tweaks
+- the next useful gain is more likely to come from stronger head quality or a different
+  controller structure, not from another small threshold nudge
+
+## Training-Side Sample Weight Experiment
+
+We tested a training-side change for:
+
+- `positive_grid_day_classifier`
+- `tradable_classifier`
+
+Experiment:
+
+- add head-specific sample weights
+- tilt weights toward more recent samples
+- add an extra boost to recent positive examples
+
+Observed result:
+
+- single holdout became better-looking, especially on `NORMAL` vs `SAFE`
+- but the full rolling `walk-forward` result did not improve in a reliable way
+- after syncing the same logic into `walk_forward_analysis.py`, the resulting baseline still sat around:
+  - `losing_windows = 9`
+  - `winning_windows = 13`
+- rolling head means were not meaningfully better than the existing baseline:
+  - `positive_grid_day_classifier` AP stayed around `0.4508`
+  - `tradable_classifier` AP stayed around `0.3916`
+
+Decision:
+
+- revert the sample-weight code path
+- keep the codebase on the simpler unweighted classifier training baseline
+- do not continue spending iteration budget on recent-positive sample weighting for these two heads
+
+Current interpretation:
+
+- the next promising training-side gain is more likely to come from:
+  - head-specific feature pruning
+  - a shorter or more targeted history window for selected heads
+  - or a more explicit positive-grid / tradable joint target design

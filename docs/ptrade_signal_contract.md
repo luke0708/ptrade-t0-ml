@@ -31,7 +31,9 @@ Recommended files:
   should prefer the A-share trading calendar, not just a weekday increment
 - `pred_upside_t1`
 - `pred_downside_t1`
+- `pred_downside_from_open_t1`
 - `pred_grid_pnl_t1`
+- `pred_clean_execution_day_t1`
 - `pred_positive_grid_day_t1`
 - `pred_tradable_score_t1`
 - `pred_trend_break_risk_t1`
@@ -49,6 +51,13 @@ Recommended files:
 - `SAFE`
 - `NORMAL`
 - `AGGRESSIVE`
+
+Current production note:
+
+- the signal contract still reserves `AGGRESSIVE`
+- the current `2026-04-24` stable production controller does not output `AGGRESSIVE`
+- high-confidence executable opportunities are mapped to `NORMAL`
+- most days may remain `SAFE` because the current production node prioritizes stability over open frequency
 
 ## PTrade Mapping Rules
 
@@ -111,6 +120,7 @@ Suggested production priority:
 
 `pred_grid_pnl_t1` may still be exported, but it should be treated as an auxiliary diagnostic rather than the primary live gating signal.
 `pred_downside_t1` may still be exported, but it should be treated as a research-only amplitude estimate rather than the primary live downside veto.
+`pred_downside_from_open_t1` may be used by the offline controller as a minimum opening-range filter, but PTrade should still treat the final exported mode and booleans as the live execution contract.
 
 ### Level2 Usage Boundary
 

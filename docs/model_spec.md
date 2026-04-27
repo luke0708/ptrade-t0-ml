@@ -38,24 +38,27 @@ Important runtime constraint:
 
 ### B. Classification / Score Heads
 
-4. `pred_positive_grid_day_t1`
+4. `pred_clean_execution_day_t1`
+- predicts the composite clean-execution label for whether next day should be allowed to open in `NORMAL` / `AGGRESSIVE`
+
+5. `pred_positive_grid_day_t1`
 - predicts whether next-day pessimistic grid replay survives costs with positive net PnL
 
-5. `pred_tradable_score_t1`
+6. `pred_tradable_score_t1`
 - predicts whether next day is worth running the grid/VWAP strategy
 
-6. `pred_trend_break_risk_t1`
+7. `pred_trend_break_risk_t1`
 - predicts whether next day is hostile to mean reversion
 
-7. `pred_hostile_selloff_risk_t1`
+8. `pred_hostile_selloff_risk_t1`
 - predicts whether next day is likely to produce an early hostile selloff that is unfriendly to dip-buy / grid activation
 
-8. `pred_vwap_reversion_score_t1`
+9. `pred_vwap_reversion_score_t1`
 - predicts the quality of next-day VWAP reversion opportunities
 
 ### C. Parameter Suggestion Head
 
-9. `recommended_grid_width_t1`
+10. `recommended_grid_width_t1`
 - predicts or maps to the next-day grid-width multiplier
 
 ## First Production Version
@@ -145,10 +148,22 @@ Recommended future integration:
 
 ## Current Production Preference
 
+Current stable production node as of `2026-04-24`:
+
+- trained at `2026-04-23T13:43:11`
+- `positive_grid_day_classifier` uses top `64` selected features
+- `tradable_classifier` uses top `96` selected features
+- `AGGRESSIVE` is disabled for now; high-confidence executable days map to `NORMAL`
+- the controller is deliberately conservative because the current priority is a stable PTrade-exportable version
+
+Controller preference:
+
 - keep `pred_grid_pnl_t1` as a diagnostic / research head
+- treat `pred_clean_execution_day_t1` as a high-confidence confirmer for candidate-side `NORMAL` / `AGGRESSIVE` gating, not the only open-position gate
 - prefer `pred_positive_grid_day_t1` as the main production classifier for grid survivability
 - use `pred_tradable_score_t1` as the stricter executable filter
 - use `pred_hostile_selloff_risk_t1` as the preferred downside / dip-buy risk damper
+- use `pred_downside_from_open_t1` in candidate controller experiments as a minimum opening-range filter; very shallow predicted downside tends to produce weaker T+0 opportunities
 - treat `pred_trend_break_risk_t1` as a soft constraint, never an absolute veto
 
 ## How The 4 Documents Guide ML

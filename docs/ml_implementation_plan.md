@@ -21,6 +21,30 @@ The ML workstream is considered successful only if all of the following are true
 - we can write a stable daily signal artifact that PTrade can consume
 - walk-forward evaluation shows strategy-level lift, not just ML metric lift
 
+## Current Node
+
+As of `2026-04-24`, the first stable production node is live:
+
+- production metadata trained at `2026-04-23T13:43:11`
+- daily inference reads `models/baseline_stock_only/`
+- research training writes `models/baseline_candidate/`
+- `positive_grid_day_classifier` uses top `64` selected features
+- `tradable_classifier` uses top `96` selected features
+- controller is conservative:
+  - `AGGRESSIVE` is disabled for now
+  - high-confidence opportunities map to `NORMAL`
+  - hostile selloff risk can force `SAFE`
+
+Current walk-forward summary:
+
+- `NORMAL` rows: `51`
+- `NORMAL grid_pnl_mean`: `0.004650`
+- `SAFE` rows: `1334`
+- `SAFE grid_pnl_mean`: `-0.004308`
+- losing / winning windows: `3 / 19`
+
+This node is usable for daily PTrade export, but it is intentionally low-frequency.
+
 ## Workstreams
 
 ### Phase 0. Freeze Specs
@@ -191,8 +215,21 @@ This means external minute data is enhancement work, not a launch blocker.
 
 ## Current Priority Order
 
-1. Canonicalize and audit `300661` long-history `1m`
-2. Build pessimistic label engine
-3. Build full daily minute-feature table
-4. Train baseline multi-head tree models
-5. Export stable daily signal for PTrade
+1. Keep daily production stable:
+   - run daily backfill / foundation / feature / export after the close
+   - do not retrain on ordinary weekdays
+2. Improve training-side head quality:
+   - prioritize `positive_grid_day_classifier`
+   - prioritize `tradable_classifier`
+   - avoid more tiny controller-threshold tweaks unless diagnostics justify them
+3. Increase `NORMAL` frequency safely:
+   - test a clearer open-opportunity label or layered controller
+   - require walk-forward to stay close to the current `3 / 19` stability before promotion
+4. Add targeted context for `300661`:
+   - overnight / US semiconductor context
+   - high-open-low-close failure regime
+   - early-path weakness features that explain false `NORMAL`
+5. Promote only after review:
+   - back up `models/baseline_stock_only/`
+   - run `promote_baseline_candidate.py`
+   - rerun `export_ml_daily_signal.py`

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import subprocess
@@ -15,12 +17,82 @@ if vendor_dir not in sys.path:
 import akshare as ak
 import pandas as pd
 
+try:
+    import yfinance as yf
+
+    _YFINANCE_AVAILABLE = True
+except Exception:
+    # Python 3.9 上 yfinance 新版会因 `list[A] | list[B]` 语法抛 TypeError，
+    # 统一捕获所有导入异常，退化到 AkShare fallback
+    _YFINANCE_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent / "data"
-MARKET_CLOSE_TIME = time(hour=15, minute=0)
+COMPLETE_DAY_CUTOFF_TIME = time(hour=15, minute=10)
 EM_BASE_URL = "https://push2his.eastmoney.com/api/qt/stock"
+
+# 分钟线完整性容忍阈值：末尾 ≤ N 根缺失视为 soft warning，不阻断流程
+# 新浪/东方财富 fallback 收盘前最后 1~2 根常缺，属正常数据源噪声
+MAX_MISSING_BARS_TOLERATED = 2
+
+
+def _expected_a_share_minute_timestamps(trading_date: date) -> list[datetime]:
+    morning = pd.date_range(
+        datetime.combine(trading_date, time(hour=9, minute=31)),
+        datetime.combine(trading_date, time(hour=11, minute=30)),
+        freq="1min",
+    )
+    afternoon = pd.date_range(
+        datetime.combine(trading_date, time(hour=13, minute=1)),
+        datetime.combine(trading_date, time(hour=15, minute=0)),
+        freq="1min",
+    )
+    return [*morning.to_pydatetime(), *afternoon.to_pydatetime()]
+
+
+def _assess_minute_day_completeness(
+    df: pd.DataFrame,
+    target_date: date,
+) -> dict[str, object]:
+    if df.empty or "datetime" not in df.columns:
+        return {
+            "target_date": target_date.isoformat(),
+            "observed_rows": 0,
+            "expected_rows": 240,
+            "missing_timestamps": [],
+            "missing_count": 240,
+            "is_complete": False,
+        }
+
+    dt_series = pd.to_datetime(df["datetime"], errors="coerce")
+    session_df = df.loc[dt_series.dt.date == target_date].copy()
+    if session_df.empty:
+        return {
+            "target_date": target_date.isoformat(),
+            "observed_rows": 0,
+            "expected_rows": 240,
+            "missing_timestamps": [],
+            "missing_count": 240,
+            "is_complete": False,
+        }
+
+    session_df["datetime"] = pd.to_datetime(session_df["datetime"], errors="coerce")
+    observed = {
+        ts.to_pydatetime().replace(tzinfo=None)
+        for ts in session_df["datetime"].dropna().drop_duplicates().tolist()
+    }
+    expected = _expected_a_share_minute_timestamps(target_date)
+    missing_timestamps = [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in expected if ts not in observed]
+    return {
+        "target_date": target_date.isoformat(),
+        "observed_rows": len(observed),
+        "expected_rows": len(expected),
+        "missing_timestamps": missing_timestamps,
+        "missing_count": len(missing_timestamps),
+        "is_complete": not missing_timestamps,
+    }
 
 
 def _safe_read_csv(csv_path: Path, required_column: str) -> pd.DataFrame:
@@ -143,13 +215,39 @@ def _previous_trading_day(reference_date: date, trading_dates: set[date] | None 
 def _expected_latest_date(now_dt: datetime, trading_dates: set[date] | None = None) -> date:
     today = now_dt.date()
     if trading_dates:
-        if today in trading_dates and now_dt.time() >= MARKET_CLOSE_TIME:
+        if today in trading_dates and now_dt.time() >= COMPLETE_DAY_CUTOFF_TIME:
             return today
         return _previous_trading_day(today, trading_dates)
 
-    if today.weekday() < 5 and now_dt.time() >= MARKET_CLOSE_TIME:
+    if today.weekday() < 5 and now_dt.time() >= COMPLETE_DAY_CUTOFF_TIME:
         return today
     return _previous_trading_day(today, trading_dates=None)
+
+
+def _clip_daily_frame_to_expected_date(df: pd.DataFrame, expected_date: date | None) -> pd.DataFrame:
+    if expected_date is None or df.empty or "date" not in df.columns:
+        return df
+    result = df.copy()
+    result["date"] = pd.to_datetime(result["date"], errors="coerce")
+    result = result.dropna(subset=["date"])
+    result = result.loc[result["date"].dt.date <= expected_date].copy()
+    if result.empty:
+        return result
+    result["date"] = result["date"].dt.strftime("%Y-%m-%d")
+    return result.reset_index(drop=True)
+
+
+def _clip_minute_frame_to_expected_date(df: pd.DataFrame, expected_date: date | None) -> pd.DataFrame:
+    if expected_date is None or df.empty or "datetime" not in df.columns:
+        return df
+    result = df.copy()
+    result["datetime"] = pd.to_datetime(result["datetime"], errors="coerce")
+    result = result.dropna(subset=["datetime"])
+    result = result.loc[result["datetime"].dt.date <= expected_date].copy()
+    if result.empty:
+        return result
+    result["datetime"] = result["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return result.reset_index(drop=True)
 
 
 def _extract_latest_date(df: pd.DataFrame, column_name: str) -> date | None:
@@ -229,6 +327,26 @@ def _normalize_tx_daily(df: pd.DataFrame) -> pd.DataFrame:
     result["volume"] = pd.to_numeric(result["volume"], errors="coerce")
     result["date"] = result["date"].dt.strftime("%Y-%m-%d")
     return result[["date", "open", "close", "high", "low", "volume", "amount"]].reset_index(drop=True)
+
+
+def _normalize_cn_daily_fallback(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize AkShare Chinese-column daily frames into the project daily schema."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rename_map = {
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
+        "成交额": "amount",
+    }
+    return _normalize_daily_fallback(df.rename(columns=rename_map))
+
+
+def _strip_market_prefix(symbol: str) -> str:
+    return symbol.replace("sh", "").replace("sz", "")
 
 
 def _build_daily_snapshot_row(
@@ -340,11 +458,41 @@ def _select_preferred_daily_frame(
 
 def get_daily_with_fallback(secid: str, fallback_symbol: str, expected_date: date | None = None) -> pd.DataFrame:
     if fallback_symbol.startswith("sz399"):
+        index_code = _strip_market_prefix(fallback_symbol)
         candidate_fetchers: list[tuple[str, Callable[[], pd.DataFrame]]] = [
             (f"Eastmoney daily {secid}", lambda: get_em_daily(secid)),
             (
                 f"Sina index daily {fallback_symbol}",
                 lambda: _normalize_daily_fallback(ak.stock_zh_index_daily(symbol=fallback_symbol)),
+            ),
+            (
+                f"Tencent index daily {fallback_symbol}",
+                lambda: _normalize_tx_daily(ak.stock_zh_a_hist_tx(symbol=fallback_symbol)),
+            ),
+            (
+                f"Tencent index daily tx {fallback_symbol}",
+                lambda: _normalize_tx_daily(ak.stock_zh_index_daily_tx(symbol=fallback_symbol)),
+            ),
+            (
+                f"Eastmoney index daily em {fallback_symbol}",
+                lambda: _normalize_daily_fallback(
+                    ak.stock_zh_index_daily_em(
+                        symbol=fallback_symbol,
+                        start_date="19700101",
+                        end_date="20500101",
+                    )
+                ),
+            ),
+            (
+                f"Eastmoney index daily hist {index_code}",
+                lambda: _normalize_cn_daily_fallback(
+                    ak.index_zh_a_hist(
+                        symbol=index_code,
+                        period="daily",
+                        start_date="19700101",
+                        end_date="20500101",
+                    )
+                ),
             ),
             (
                 f"Sina index spot snapshot {fallback_symbol}",
@@ -387,6 +535,8 @@ def update_daily_file(
 
     df_old = _safe_read_csv(csv_path, "date")
     df_new = get_daily_with_fallback(secid, fallback_symbol=fallback_symbol, expected_date=expected_date)
+    df_old = _clip_daily_frame_to_expected_date(df_old, expected_date)
+    df_new = _clip_daily_frame_to_expected_date(df_new, expected_date)
     if df_new.empty:
         LOGGER.warning("新数据 %s 获取为空，保留现有文件", secid)
         return _extract_latest_date(df_old, "date")
@@ -406,7 +556,125 @@ def update_daily_file(
     return latest_date
 
 
-def update_300661_1m(data_dir: Path = DATA_DIR) -> date | None:
+# ---------------------------------------------------------------------------
+# 美股指数日线（^SOX 费城半导体 / ^IXIC 纳斯达克）
+# ---------------------------------------------------------------------------
+
+
+def get_us_index_daily(ticker: str) -> pd.DataFrame:
+    """拉取美股指数日线数据，优先使用 yfinance，失败则 fallback 到 AkShare。
+
+    输出列：date, open, close, high, low, volume, amount
+    amount 字段对美股指数没有成交额，填 pd.NA 保持格式一致。
+    """
+    # --- 主力：yfinance ---
+    if _YFINANCE_AVAILABLE:
+        try:
+            LOGGER.info("[yfinance] 拉取 %s 日线数据...", ticker)
+            raw = yf.download(ticker, period="max", auto_adjust=True, progress=False)
+            if raw is not None and not raw.empty:
+                df = raw.reset_index()
+                # yfinance 列名可能是 MultiIndex，先 flatten
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                df = df.rename(
+                    columns={
+                        "Date": "date",
+                        "Open": "open",
+                        "Close": "close",
+                        "High": "high",
+                        "Low": "low",
+                        "Volume": "volume",
+                    }
+                )
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+                df["amount"] = pd.NA
+                cols = ["date", "open", "close", "high", "low", "volume", "amount"]
+                for col in cols:
+                    if col not in df.columns:
+                        df[col] = pd.NA
+                df = df[cols].copy()
+                for col in ["open", "close", "high", "low", "volume"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
+                LOGGER.info("[yfinance] %s 拉取成功，共 %d 行", ticker, len(df))
+                return df.reset_index(drop=True)
+        except Exception as exc:
+            LOGGER.warning("[yfinance] %s 拉取失败，尝试 AkShare fallback: %s", ticker, exc)
+
+    # --- Fallback：AkShare stock_us_hist ---
+    # AkShare 用 symbol 格式如 ".SOX" / ".IXIC"（去掉 ^）
+    ak_symbol = ticker.lstrip("^").lstrip(".")
+    try:
+        LOGGER.info("[AkShare] 拉取美股指数 %s 日线数据...", ak_symbol)
+        raw = ak.stock_us_hist(symbol=ak_symbol, period="daily", adjust="")
+        if raw is not None and not raw.empty:
+            df = raw.rename(
+                columns={
+                    "日期": "date",
+                    "开盘": "open",
+                    "收盘": "close",
+                    "最高": "high",
+                    "最低": "low",
+                    "成交量": "volume",
+                    "成交额": "amount",
+                }
+            ).copy()
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+            if "amount" not in df.columns:
+                df["amount"] = pd.NA
+            cols = ["date", "open", "close", "high", "low", "volume", "amount"]
+            for col in cols:
+                if col not in df.columns:
+                    df[col] = pd.NA
+            df = df[cols]
+            for col in ["open", "close", "high", "low", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
+            LOGGER.info("[AkShare] %s 拉取成功，共 %d 行", ak_symbol, len(df))
+            return df.reset_index(drop=True)
+    except Exception as exc:
+        LOGGER.error("[AkShare] %s 拉取失败: %s", ak_symbol, exc)
+
+    return pd.DataFrame()
+
+
+def update_us_index_file(
+    ticker: str,
+    csv_filename: str,
+    data_dir: Path = DATA_DIR,
+) -> date | None:
+    """拉取指定美股指数日线，增量合并后落盘。"""
+    csv_path = data_dir / csv_filename
+    LOGGER.info("--- 更新 %s (%s 日线数据) ---", csv_filename, ticker)
+
+    df_old = _safe_read_csv(csv_path, "date")
+    df_new = get_us_index_daily(ticker)
+
+    if df_new.empty:
+        LOGGER.warning("%s 新数据获取为空，保留现有文件", ticker)
+        return _extract_latest_date(df_old, "date")
+
+    if not df_old.empty:
+        df_old["date"] = pd.to_datetime(df_old["date"]).dt.strftime("%Y-%m-%d")
+        df_merged = pd.concat([df_old, df_new], ignore_index=True)
+        df_merged = (
+            df_merged.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+        )
+    else:
+        df_merged = df_new
+
+    cols = ["date", "open", "close", "high", "low", "volume", "amount"]
+    df_merged = df_merged[cols]
+    df_merged.to_csv(csv_path, index=False)
+    latest_date = _extract_latest_date(df_merged, "date")
+    LOGGER.info("%s 更新完成! 最新日期: %s, 总行数: %d", csv_filename, df_merged["date"].iloc[-1], len(df_merged))
+    return latest_date
+
+
+def update_300661_1m(
+    data_dir: Path = DATA_DIR,
+    expected_date: date | None = None,
+) -> date | None:
     csv_path = data_dir / "300661_SZ_1m_ptrade.csv"
     LOGGER.info("--- 更新 300661_SZ_1m_ptrade.csv (1分钟数据) ---")
 
@@ -477,6 +745,12 @@ def update_300661_1m(data_dir: Path = DATA_DIR) -> date | None:
             df_new[column] = pd.NA
     df_new = df_new[cols]
     df_new["datetime"] = pd.to_datetime(df_new["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
+    df_old = _clip_minute_frame_to_expected_date(df_old, expected_date)
+    df_new = _clip_minute_frame_to_expected_date(df_new, expected_date)
+
+    if df_new.empty:
+        LOGGER.warning("新拉取的分钟线在完整交易日 cutoff 过滤后为空，保留现有完整数据")
+        return _extract_latest_date(df_old, "datetime")
 
     if not df_old.empty:
         df_old["datetime"] = pd.to_datetime(df_old["datetime"]).dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -489,11 +763,22 @@ def update_300661_1m(data_dir: Path = DATA_DIR) -> date | None:
 
     df_merged.to_csv(csv_path, index=False)
     latest_date = _extract_latest_date(df_merged, "datetime")
+    latest_session_completeness: dict[str, object] | None = None
+    if latest_date is not None:
+        latest_session_completeness = _assess_minute_day_completeness(df_merged, latest_date)
     LOGGER.info(
         "300661 1分钟线更新完成! 最新一分钟时间: %s, 总行数: %s",
         df_merged["datetime"].iloc[-1],
         len(df_merged),
     )
+    if latest_session_completeness and not latest_session_completeness["is_complete"]:
+        LOGGER.warning(
+            "300661 最新交易日分钟线不完整: target_date=%s observed_rows=%s expected_rows=%s missing_timestamps=%s",
+            latest_session_completeness["target_date"],
+            latest_session_completeness["observed_rows"],
+            latest_session_completeness["expected_rows"],
+            latest_session_completeness["missing_timestamps"][:10],
+        )
     return latest_date
 
 
@@ -508,11 +793,20 @@ def validate_backfill_success(
         trading_dates = _load_trading_calendar_dates()
 
     expected_date = _expected_latest_date(now_dt, trading_dates=trading_dates if trading_dates else None)
+    stock_1m_df = _safe_read_csv(data_dir / "300661_SZ_1m_ptrade.csv", "datetime")
     source_dates = {
-        "stock_1m": _extract_latest_date(_safe_read_csv(data_dir / "300661_SZ_1m_ptrade.csv", "datetime"), "datetime"),
+        "stock_1m": _extract_latest_date(stock_1m_df, "datetime"),
         "index_daily": _extract_latest_date(_safe_read_csv(data_dir / "399006.csv", "date"), "date"),
         "sector_daily": _extract_latest_date(_safe_read_csv(data_dir / "512480.csv", "date"), "date"),
     }
+    stock_minute_completeness = _assess_minute_day_completeness(stock_1m_df, expected_date)
+    _n_missing = len(stock_minute_completeness["missing_timestamps"])
+    # 缺失 > MAX_MISSING_BARS_TOLERATED 才视为 hard incomplete，否则降级为 warning
+    stock_1m_incomplete = (
+        source_dates["stock_1m"] == expected_date
+        and not stock_minute_completeness["is_complete"]
+        and _n_missing > MAX_MISSING_BARS_TOLERATED
+    )
     hard_stale_sources = {
         name: value.isoformat() if value else "missing"
         for name, value in source_dates.items()
@@ -523,7 +817,18 @@ def validate_backfill_success(
         for name, value in source_dates.items()
         if name in {"index_daily", "sector_daily"} and (value is None or value < expected_date)
     }
-    if hard_stale_sources:
+    if hard_stale_sources or stock_1m_incomplete:
+        minute_completeness_message = ""
+        if stock_1m_incomplete:
+            minute_completeness_message = (
+                " latest_day_minute_completeness={"
+                f"target_date:{stock_minute_completeness['target_date']}, "
+                f"observed_rows:{stock_minute_completeness['observed_rows']}, "
+                f"expected_rows:{stock_minute_completeness['expected_rows']}, "
+                f"missing_count:{stock_minute_completeness['missing_count']}, "
+                f"missing_timestamps:{stock_minute_completeness['missing_timestamps'][:10]}"
+                "}."
+            )
         raise ValueError(
             "Backfill hard dependency is stale. "
             f"current_local_time={now_dt.isoformat(timespec='seconds')}, "
@@ -531,12 +836,17 @@ def validate_backfill_success(
             "source_dates={"
             + ", ".join(f"{name}:{value.isoformat() if value else 'missing'}" for name, value in source_dates.items())
             + "}. "
+            + minute_completeness_message
+            + " "
             "300661 1m is a hard dependency; confirm the local minute backfill reached the latest trading day before continuing."
         )
 
     summary = {
         "expected_latest_date": expected_date.isoformat(),
         **{name: value.isoformat() for name, value in source_dates.items() if value is not None},
+        "stock_1m_observed_rows": stock_minute_completeness["observed_rows"],
+        "stock_1m_expected_rows": stock_minute_completeness["expected_rows"],
+        "stock_1m_missing_count": stock_minute_completeness["missing_count"],
         "soft_stale_sources": soft_stale_sources,
     }
     if soft_stale_sources:
@@ -544,6 +854,15 @@ def validate_backfill_success(
             "Backfill soft dependencies are stale, but continuing. expected_latest_date=%s soft_stale_sources=%s",
             expected_date.isoformat(),
             soft_stale_sources,
+        )
+    # 分钟线轻度缺失（≤ MAX_MISSING_BARS_TOLERATED）：容忍放行，但仍 WARNING 提示
+    if 0 < _n_missing <= MAX_MISSING_BARS_TOLERATED:
+        LOGGER.warning(
+            "300661 1m 分钟线轻度缺失（容忍放行）: target_date=%s missing=%d/%d missing_timestamps=%s",
+            stock_minute_completeness["target_date"],
+            _n_missing,
+            stock_minute_completeness["expected_rows"],
+            stock_minute_completeness["missing_timestamps"],
         )
     LOGGER.info("Backfill freshness check passed: %s", summary)
     return summary
@@ -569,7 +888,12 @@ def run_daily_backfill(data_dir: Path = DATA_DIR, now_dt: datetime | None = None
         data_dir=data_dir,
         expected_date=expected_date,
     )
-    update_300661_1m(data_dir=data_dir)
+    update_300661_1m(data_dir=data_dir, expected_date=expected_date)
+
+    # 美股指数：^SOX 费城半导体 / ^IXIC 纳斯达克
+    update_us_index_file("^SOX", "soxx_daily.csv", data_dir=data_dir)
+    update_us_index_file("^IXIC", "nasdaq_daily.csv", data_dir=data_dir)
+
     return validate_backfill_success(data_dir=data_dir, now_dt=now_dt, trading_dates=trading_dates)
 
 

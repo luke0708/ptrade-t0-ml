@@ -10,16 +10,16 @@ from ptrade_t0_ml.ptrade_strategy_export import (
 
 
 class PTradeStrategyExportTests(unittest.TestCase):
-    def test_render_ptrade_strategy_source_replaces_embedded_signal_payload(self) -> None:
+    def test_render_ptrade_strategy_source_replaces_daily_signal(self) -> None:
         template_source = (
             '"""template"""\n'
-            "ML_SIGNAL_PAYLOAD = {\n"
+            "DAILY_SIGNAL = {\n"
             '    "signal_for_date": "2026-04-20",\n'
             '    "recommended_mode": "SAFE",\n'
             "}\n"
             "\n"
             "def initialize(context):\n"
-            "    g.ml_signal = ML_SIGNAL_PAYLOAD\n"
+            "    g.ml_signal = DAILY_SIGNAL\n"
         )
         signal_payload = {
             "date": "2026-04-20",
@@ -34,6 +34,7 @@ class PTradeStrategyExportTests(unittest.TestCase):
         self.assertIn("'recommended_mode': 'NORMAL'", rendered)
         self.assertIn("def initialize(context):", rendered)
         self.assertNotIn("'signal_for_date': '2026-04-20'", rendered)
+        self.assertIn("DAILY_SIGNAL = {", rendered)
 
     def test_export_ptrade_strategy_writes_dated_and_latest_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_str:
@@ -43,13 +44,13 @@ class PTradeStrategyExportTests(unittest.TestCase):
             template_path = data_dir / "ptrade_300661.py"
             template_path.write_text(
                 '"""template"""\n'
-                "ML_SIGNAL_PAYLOAD = {\n"
+                "DAILY_SIGNAL = {\n"
                 '    "signal_for_date": "2026-04-20",\n'
                 '    "recommended_mode": "SAFE",\n'
                 "}\n"
                 "\n"
                 "def initialize(context):\n"
-                "    g.ml_signal = ML_SIGNAL_PAYLOAD\n",
+                "    g.ml_signal = DAILY_SIGNAL\n",
                 encoding="utf-8",
             )
             config = ProjectConfig(base_dir=temp_dir)
@@ -71,7 +72,29 @@ class PTradeStrategyExportTests(unittest.TestCase):
             rendered = dated_path.read_text(encoding="utf-8")
             self.assertIn("'signal_for_date': '2026-04-21'", rendered)
             self.assertIn("'position_scale': 0.85", rendered)
-            self.assertIn("g.ml_signal = ML_SIGNAL_PAYLOAD", rendered)
+            self.assertIn("g.ml_signal = DAILY_SIGNAL", rendered)
+
+    def test_render_ptrade_strategy_source_keeps_backward_compatibility_with_old_variable_name(self) -> None:
+        template_source = (
+            '"""template"""\n'
+            "ML_SIGNAL_PAYLOAD = {\n"
+            '    "signal_for_date": "2026-04-20",\n'
+            '    "recommended_mode": "SAFE",\n'
+            "}\n"
+            "\n"
+            "def initialize(context):\n"
+            "    g.ml_signal = ML_SIGNAL_PAYLOAD\n"
+        )
+        signal_payload = {
+            "date": "2026-04-20",
+            "signal_for_date": "2026-04-21",
+            "recommended_mode": "NORMAL",
+        }
+
+        rendered = render_ptrade_strategy_source(template_source, signal_payload)
+
+        self.assertIn("ML_SIGNAL_PAYLOAD = {", rendered)
+        self.assertIn("'signal_for_date': '2026-04-21'", rendered)
 
 
 if __name__ == "__main__":

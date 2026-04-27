@@ -122,6 +122,36 @@ Deployment note:
 - this is the preferred production-facing downside risk head for `300661`
 - `target_downside_t1` should remain exported for research, ranking comparison, and post-mortem diagnostics
 
+### C2. Clean Execution Day
+
+`target_clean_execution_day_t1`
+
+Meaning:
+- whether day `t+1` looks like a genuinely clean execution day for the current `300661` T+0 playbook, not just a day with isolated positive signals
+
+Current composite definition:
+- `target_positive_grid_day_t1 = 1`
+- `target_tradable_score_t1 = 1`
+- `target_downside_from_open_t1 >= -0.025`
+- `target_hostile_selloff_risk_t1 = 0`
+
+Why this v2 definition is broader:
+- the earlier version also required `vwap_reversion = 1` and `trend_break_risk = 0`
+- that made the label too sparse and pushed the candidate controller toward almost-all-`SAFE`
+- a pure `positive_grid + tradable + no_hostile` version turned out to be too wide in walk-forward tests
+- the current version adds a direct open-anchor downside guard so the label better reflects “opening is allowed and the early selloff is still tolerable”
+- `vwap_reversion` and `trend_break_risk` remain useful component labels, but they are now better handled as controller dampers instead of hard label requirements
+
+Role:
+
+- this is a composite controller-oriented label
+- it exists because the earlier controller depended on combining several independent heads with heuristics, and walk-forward results showed that combination remained unstable
+- the goal is to let the model learn “opening execution should be allowed” directly instead of reconstructing that decision only after scoring
+
+Deployment note:
+- this label is intended to become the primary `NORMAL` / `AGGRESSIVE` gate for candidate controller experiments
+- it does not replace the underlying component labels; those remain important for diagnostics, fallback logic, and feature analysis
+
 ### D. Grid PnL
 
 `target_grid_pnl_t1`

@@ -17,21 +17,43 @@ from .minute_foundation import configure_logging as configure_foundation_logging
 from .ptrade_strategy_export import export_ptrade_strategy
 
 LOGGER = logging.getLogger(__name__)
-MARKET_CLOSE_TIME = time(hour=15, minute=0)
+COMPLETE_DAY_CUTOFF_TIME = time(hour=15, minute=10)
+# For 300661, a too-shallow predicted downside-from-open often means
+# there is not enough usable opening range for T+0 execution.
+OPEN_DOWNSIDE_MIN_RANGE_FOR_NORMAL = -0.0225
+POSITIVE_GRID_NEAR_EDGE_MARGIN = 0.015
+TRADABLE_NEAR_EDGE_MARGIN = 0.05
+NEAR_EDGE_UPSIDE_FLOOR = 0.02
+NEAR_EDGE_GRID_PNL_FLOOR = -0.01
+SECTOR_DAILY_RETURN_MIN_FOR_NORMAL = 0.015
+OPEN15_VOLUME_RATIO_MIN_FOR_NORMAL = 0.17
+PRIOR_DAY_EXTENSION_RETURN_MAX_FOR_NORMAL = 0.06
+CLEAN_CONFIRMATION_REVERSION_MIN_FOR_NORMAL = 0.20
 
 REGRESSION_HEAD_TO_SIGNAL_FIELD = {
     "upside_regression": "pred_upside_t1",
     "downside_regression": "pred_downside_t1",
+    "downside_from_open_regression": "pred_downside_from_open_t1",
     "grid_pnl_regression": "pred_grid_pnl_t1",
 }
 
 CLASSIFICATION_HEAD_TO_SIGNAL_FIELD = {
+    "clean_execution_day_classifier": "pred_clean_execution_day_t1",
     "positive_grid_day_classifier": "pred_positive_grid_day_t1",
     "tradable_classifier": "pred_tradable_score_t1",
     "trend_break_risk_classifier": "pred_trend_break_risk_t1",
     "hostile_selloff_risk_classifier": "pred_hostile_selloff_risk_t1",
     "vwap_reversion_classifier": "pred_vwap_reversion_score_t1",
 }
+
+
+def _available_classification_head_mapping(metadata: dict[str, object]) -> dict[str, str]:
+    available_heads = metadata.get("heads", {})
+    return {
+        head_name: signal_field
+        for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items()
+        if head_name in available_heads
+    }
 
 
 def _load_baseline_metadata(config: ProjectConfig) -> dict[str, object]:
@@ -138,11 +160,11 @@ def _previous_trading_day(reference_date: date, trading_dates: set[date] | None 
 def _expected_feature_date(now_dt: datetime, trading_dates: set[date] | None = None) -> date:
     today = now_dt.date()
     if trading_dates:
-        if today in trading_dates and now_dt.time() >= MARKET_CLOSE_TIME:
+        if today in trading_dates and now_dt.time() >= COMPLETE_DAY_CUTOFF_TIME:
             return today
         return _previous_trading_day(today, trading_dates)
 
-    if today.weekday() < 5 and now_dt.time() >= MARKET_CLOSE_TIME:
+    if today.weekday() < 5 and now_dt.time() >= COMPLETE_DAY_CUTOFF_TIME:
         return today
     return _previous_trading_day(today, trading_dates=None)
 
@@ -250,15 +272,19 @@ def _load_classifier(config: ProjectConfig):
 
 def _score_latest_row(config: ProjectConfig, metadata: dict[str, object], latest_feature_row: pd.DataFrame) -> dict[str, float]:
     feature_columns = metadata["feature_columns"]
-    X_latest = latest_feature_row[feature_columns]
     predictions: dict[str, float] = {}
+    classification_head_mapping = _available_classification_head_mapping(metadata)
 
     for head_name, signal_field in REGRESSION_HEAD_TO_SIGNAL_FIELD.items():
+        head_feature_columns = metadata["heads"][head_name].get("feature_columns", feature_columns)
+        X_latest = latest_feature_row[head_feature_columns]
         model = _load_regressor(config)
         model.load_model(metadata["heads"][head_name]["model_path"])
         predictions[signal_field] = float(model.predict(X_latest)[0])
 
-    for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in classification_head_mapping.items():
+        head_feature_columns = metadata["heads"][head_name].get("feature_columns", feature_columns)
+        X_latest = latest_feature_row[head_feature_columns]
         model = _load_classifier(config)
         model.load_model(metadata["heads"][head_name]["model_path"])
         predictions[signal_field] = float(model.predict_proba(X_latest)[0, 1])
@@ -271,14 +297,30 @@ def _derive_runtime_controls(
     thresholds: dict[str, float],
     latest_feature_row: pd.Series,
 ) -> dict[str, float | bool | str]:
+    clean_execution_threshold = thresholds.get("pred_clean_execution_day_t1")
     positive_grid_threshold = thresholds["pred_positive_grid_day_t1"]
     tradable_threshold = thresholds["pred_tradable_score_t1"]
     trend_threshold = thresholds["pred_trend_break_risk_t1"]
     hostile_selloff_threshold = thresholds["pred_hostile_selloff_risk_t1"]
     vwap_threshold = thresholds["pred_vwap_reversion_score_t1"]
 
+    clean_execution_available = (
+        clean_execution_threshold is not None and "pred_clean_execution_day_t1" in predictions
+    )
+    clean_execution_confirmed = bool(
+        clean_execution_available
+        and predictions["pred_clean_execution_day_t1"] >= float(clean_execution_threshold)
+    )
     positive_grid_on = predictions["pred_positive_grid_day_t1"] >= positive_grid_threshold
     tradable_on = predictions["pred_tradable_score_t1"] >= tradable_threshold
+    positive_grid_near = (
+        predictions["pred_positive_grid_day_t1"]
+        >= max(0.0, positive_grid_threshold - POSITIVE_GRID_NEAR_EDGE_MARGIN)
+    )
+    tradable_near = (
+        predictions["pred_tradable_score_t1"]
+        >= max(0.0, tradable_threshold - TRADABLE_NEAR_EDGE_MARGIN)
+    )
     trend_high = predictions["pred_trend_break_risk_t1"] >= trend_threshold
     hostile_selloff_high = predictions["pred_hostile_selloff_risk_t1"] >= hostile_selloff_threshold
     vwap_on = predictions["pred_vwap_reversion_score_t1"] >= vwap_threshold
@@ -286,15 +328,43 @@ def _derive_runtime_controls(
     predicted_upside = predictions["pred_upside_t1"]
     predicted_downside = predictions["pred_downside_t1"]
     predicted_grid_pnl = predictions["pred_grid_pnl_t1"]
+    predicted_downside_from_open = predictions.get("pred_downside_from_open_t1")
     predicted_total_range = max(predicted_upside, 0.0) + abs(min(predicted_downside, 0.0))
     base_grid_width = float(latest_feature_row.get("grid_step_pct_t1", 0.01))
+    sector_daily_return = float(latest_feature_row.get("sec_daily_return", 1.0))
+    open15_volume_ratio = float(latest_feature_row.get("stk_m_open15_volume_ratio", 1.0))
+    prior_day_return = float(latest_feature_row.get("daily_return", 0.0))
     core_edge = bool(positive_grid_on and tradable_on)
+    # Clean execution acts as a high-confidence confirmer, not the only gate.
     clean_edge = bool(core_edge and not hostile_selloff_high)
     reversion_edge = bool(clean_edge and vwap_on)
+    open_downside_too_shallow = bool(
+        predicted_downside_from_open is not None
+        and predicted_downside_from_open > OPEN_DOWNSIDE_MIN_RANGE_FOR_NORMAL
+    )
     strong_range = bool(
         predicted_upside >= 0.03
         and predicted_grid_pnl > 0
         and predicted_total_range >= max(0.03, base_grid_width * 2)
+    )
+    near_clean_edge = bool(
+        not core_edge
+        and not clean_execution_confirmed
+        and positive_grid_near
+        and tradable_near
+        and not hostile_selloff_high
+        and not trend_high
+        and not open_downside_too_shallow
+        and predicted_upside >= NEAR_EDGE_UPSIDE_FLOOR
+        and predicted_grid_pnl >= NEAR_EDGE_GRID_PNL_FLOOR
+    )
+    sector_confirmation_weak = sector_daily_return < SECTOR_DAILY_RETURN_MIN_FOR_NORMAL
+    open15_participation_weak = open15_volume_ratio < OPEN15_VOLUME_RATIO_MIN_FOR_NORMAL
+    weak_environment_confirmation = bool(sector_confirmation_weak and open15_participation_weak)
+    prior_day_extension_high = prior_day_return > PRIOR_DAY_EXTENSION_RETURN_MAX_FOR_NORMAL
+    weak_reversion_for_clean_confirmation = bool(
+        clean_execution_confirmed
+        and predictions["pred_vwap_reversion_score_t1"] < CLEAN_CONFIRMATION_REVERSION_MIN_FOR_NORMAL
     )
     severe_negative_stack = bool(
         hostile_selloff_high
@@ -321,12 +391,43 @@ def _derive_runtime_controls(
         dip_buy_enabled = False
         high_sell_enabled = False
         rationale = "negative_stack_with_hostile_selloff"
-    elif reversion_edge and strong_range and not trend_high:
-        mode = "AGGRESSIVE"
-        position_scale = 1.0
-        grid_width_scale = 0.92
+    elif clean_edge and open_downside_too_shallow:
+        trend_weak = bool(trend_high)
+        position_scale = 0.45
+        grid_width_scale = 1.10
+        dip_buy_enabled = False
+        rationale = "shallow_open_downside_blocks_execution"
+    elif clean_edge and weak_environment_confirmation:
+        trend_weak = bool(trend_high)
+        position_scale = 0.45
+        grid_width_scale = 1.10
+        dip_buy_enabled = False
+        rationale = "weak_sector_and_participation_damper"
+    elif clean_edge and prior_day_extension_high:
+        trend_weak = bool(trend_high)
+        position_scale = 0.45
+        grid_width_scale = 1.12
+        dip_buy_enabled = False
+        rationale = "prior_day_extension_damper"
+    elif clean_edge and weak_reversion_for_clean_confirmation:
+        trend_weak = bool(trend_high)
+        position_scale = 0.45
+        grid_width_scale = 1.10
+        dip_buy_enabled = False
+        rationale = "weak_reversion_clean_confirmation_damper"
+    elif clean_execution_confirmed and reversion_edge and strong_range and not trend_high:
+        mode = "NORMAL"
+        position_scale = 0.92
+        grid_width_scale = 0.95
         dip_buy_enabled = True
-        rationale = "clean_reversion_and_strong_range"
+        rationale = "clean_execution_and_strong_range"
+    elif clean_execution_confirmed and clean_edge:
+        mode = "NORMAL"
+        trend_weak = bool(trend_high)
+        position_scale = 0.72 if trend_high else 0.88
+        grid_width_scale = 1.08 if trend_high else 0.98
+        dip_buy_enabled = bool(vwap_on and predicted_downside > -0.03)
+        rationale = "clean_execution_with_trend_damper" if trend_high else "clean_execution_classifier_confirmation"
     elif clean_edge:
         mode = "NORMAL"
         trend_weak = bool(trend_high)
@@ -334,6 +435,13 @@ def _derive_runtime_controls(
         grid_width_scale = 1.08 if trend_high else 1.00
         dip_buy_enabled = bool(vwap_on and predicted_downside > -0.03)
         rationale = "clean_edge_with_trend_damper" if trend_high else "clean_edge_without_hostile_selloff"
+    elif near_clean_edge:
+        mode = "NORMAL"
+        trend_weak = False
+        position_scale = 0.68
+        grid_width_scale = 1.04
+        dip_buy_enabled = False
+        rationale = "near_clean_edge_low_confidence"
     elif core_edge and hostile_selloff_high:
         trend_weak = True
         position_scale = 0.45
@@ -380,14 +488,10 @@ def build_ml_daily_signal(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
     dependency_status = _assert_daily_inference_freshness(config, feature_date)
 
     predictions = _score_latest_row(config, metadata, latest_feature_row_df)
+    classification_head_mapping = _available_classification_head_mapping(metadata)
     thresholds = {
-        "pred_positive_grid_day_t1": float(metadata["heads"]["positive_grid_day_classifier"]["recommended_threshold"]),
-        "pred_tradable_score_t1": float(metadata["heads"]["tradable_classifier"]["recommended_threshold"]),
-        "pred_trend_break_risk_t1": float(metadata["heads"]["trend_break_risk_classifier"]["recommended_threshold"]),
-        "pred_hostile_selloff_risk_t1": float(
-            metadata["heads"]["hostile_selloff_risk_classifier"]["recommended_threshold"]
-        ),
-        "pred_vwap_reversion_score_t1": float(metadata["heads"]["vwap_reversion_classifier"]["recommended_threshold"]),
+        signal_field: float(metadata["heads"][head_name]["recommended_threshold"])
+        for head_name, signal_field in classification_head_mapping.items()
     }
     runtime_controls = _derive_runtime_controls(predictions, thresholds, latest_feature_row)
     runtime_controls = _apply_soft_dependency_safe_downgrade(runtime_controls, dependency_status)

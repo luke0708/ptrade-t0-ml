@@ -42,6 +42,11 @@ EXCLUDED_FEATURE_PREFIXES = (
 )
 
 CLASSIFICATION_HEAD_RULES = {
+    "clean_execution_day_classifier": {
+        "beta": 1.25,
+        "min_precision_floor": 0.30,
+        "max_positive_rate_multiplier": 1.40,
+    },
     "positive_grid_day_classifier": {
         "beta": 1.5,
         "min_precision_floor": 0.25,
@@ -66,6 +71,17 @@ CLASSIFICATION_HEAD_RULES = {
         "beta": 1.5,
         "min_precision_floor": 0.20,
         "max_positive_rate_multiplier": 1.80,
+    },
+}
+
+CLASSIFICATION_HEAD_FEATURE_SELECTION_RULES = {
+    "positive_grid_day_classifier": {
+        "max_features": 64,
+        "min_features": 24,
+    },
+    "tradable_classifier": {
+        "max_features": 96,
+        "min_features": 24,
     },
 }
 
@@ -267,6 +283,66 @@ def _compute_scale_pos_weight(y_train: pd.Series) -> float:
     return max(1.0, negatives / positives)
 
 
+def _select_head_feature_columns(
+    head_name: str,
+    feature_columns: list[str],
+    fitted_model: object,
+) -> tuple[list[str], dict[str, object]]:
+    rules = CLASSIFICATION_HEAD_FEATURE_SELECTION_RULES.get(head_name)
+    if not rules:
+        return list(feature_columns), {
+            "enabled": False,
+            "selected_feature_count": int(len(feature_columns)),
+            "selection_reason": "head_not_configured",
+        }
+
+    try:
+        booster = fitted_model.get_booster()
+        importance_by_feature = booster.get_score(importance_type="gain")
+    except Exception:
+        return list(feature_columns), {
+            "enabled": False,
+            "selected_feature_count": int(len(feature_columns)),
+            "selection_reason": "importance_unavailable",
+        }
+
+    if not importance_by_feature:
+        return list(feature_columns), {
+            "enabled": False,
+            "selected_feature_count": int(len(feature_columns)),
+            "selection_reason": "empty_importance",
+        }
+
+    sorted_feature_names = [
+        feature_name
+        for feature_name, _ in sorted(
+            importance_by_feature.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if feature_name in feature_columns
+    ]
+    max_features = min(int(rules["max_features"]), len(feature_columns))
+    min_features = min(int(rules["min_features"]), max_features)
+    selected_feature_columns = sorted_feature_names[:max_features]
+    if len(selected_feature_columns) < min_features:
+        selected_feature_columns = list(feature_columns)
+        return selected_feature_columns, {
+            "enabled": False,
+            "selected_feature_count": int(len(selected_feature_columns)),
+            "selection_reason": "insufficient_ranked_features",
+        }
+
+    return selected_feature_columns, {
+        "enabled": True,
+        "selected_feature_count": int(len(selected_feature_columns)),
+        "selection_reason": "top_gain_pruned",
+        "max_features": int(max_features),
+        "min_features": int(min_features),
+        "selected_feature_preview": selected_feature_columns[:10],
+    }
+
+
 def _select_decision_threshold(
     head_name: str,
     y_true: pd.Series,
@@ -391,6 +467,7 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         }
 
     classification_targets = {
+        "clean_execution_day_classifier": "target_clean_execution_day_t1",
         "positive_grid_day_classifier": "target_positive_grid_day_t1",
         "tradable_classifier": "target_tradable_score_t1",
         "trend_break_risk_classifier": "target_trend_break_risk_t1",
@@ -401,7 +478,17 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
         calibration_scale_pos_weight = _compute_scale_pos_weight(classifier_train_df[target_column])
         calibration_classifier = build_xgb_classifier(config, scale_pos_weight=calibration_scale_pos_weight)
         calibration_classifier.fit(X_classifier_train, classifier_train_df[target_column])
-        validation_probabilities = calibration_classifier.predict_proba(X_classifier_validation)[:, 1]
+        selected_feature_columns, feature_selection_summary = _select_head_feature_columns(
+            head_name=head_name,
+            feature_columns=feature_columns,
+            fitted_model=calibration_classifier,
+        )
+        X_classifier_train_selected = classifier_train_df[selected_feature_columns]
+        X_classifier_validation_selected = classifier_validation_df[selected_feature_columns]
+        if feature_selection_summary["enabled"]:
+            calibration_classifier = build_xgb_classifier(config, scale_pos_weight=calibration_scale_pos_weight)
+            calibration_classifier.fit(X_classifier_train_selected, classifier_train_df[target_column])
+        validation_probabilities = calibration_classifier.predict_proba(X_classifier_validation_selected)[:, 1]
         threshold_calibration = _select_decision_threshold(
             head_name=head_name,
             y_true=classifier_validation_df[target_column],
@@ -411,8 +498,10 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
 
         scale_pos_weight = _compute_scale_pos_weight(train_df[target_column])
         classifier = build_xgb_classifier(config, scale_pos_weight=scale_pos_weight)
-        classifier.fit(X_train, train_df[target_column])
-        classifier_probabilities = classifier.predict_proba(X_test)[:, 1]
+        X_train_selected = train_df[selected_feature_columns]
+        X_test_selected = test_df[selected_feature_columns]
+        classifier.fit(X_train_selected, train_df[target_column])
+        classifier_probabilities = classifier.predict_proba(X_test_selected)[:, 1]
         classifier_path = config.baseline_models_dir / f"{head_name}.json"
         classifier.save_model(classifier_path)
         beta = float(threshold_calibration["selection_beta"])
@@ -422,6 +511,8 @@ def train_baseline_models(config: ProjectConfig = DEFAULT_CONFIG) -> dict[str, o
             "model_path": str(classifier_path),
             "scale_pos_weight": float(scale_pos_weight),
             "calibration_scale_pos_weight": float(calibration_scale_pos_weight),
+            "feature_columns": selected_feature_columns,
+            "feature_selection_summary": feature_selection_summary,
             "metrics": _evaluate_classification(test_df[target_column], classifier_probabilities, beta=beta),
             "recommended_threshold": recommended_threshold,
             "recommended_threshold_metrics": _evaluate_classification(

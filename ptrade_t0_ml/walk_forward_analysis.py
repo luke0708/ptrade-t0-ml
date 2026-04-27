@@ -13,6 +13,7 @@ from .baseline_models import (
     _evaluate_classification,
     _evaluate_regression,
     _select_decision_threshold,
+    _select_head_feature_columns,
     build_training_dataset,
     build_xgb_classifier,
     build_xgb_regressor,
@@ -42,6 +43,13 @@ DEFAULT_MIN_TEST_ROWS = 21
 RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD = {
     "downside_from_open_regression": "pred_downside_from_open_t1",
 }
+
+
+def _available_classification_head_mapping(train_df: pd.DataFrame) -> dict[str, str]:
+    mapping = dict(CLASSIFICATION_HEAD_TO_SIGNAL_FIELD)
+    if "target_clean_execution_day_t1" not in train_df.columns:
+        mapping.pop("clean_execution_day_classifier", None)
+    return mapping
 
 
 @dataclass(frozen=True)
@@ -232,6 +240,7 @@ def _score_walk_forward_window(
     head_metric_rows: list[dict[str, object]] = []
     thresholds: dict[str, float] = {}
     regression_head_to_signal_field = _available_regression_head_mapping(train_df)
+    classification_head_to_signal_field = _available_classification_head_mapping(train_df)
 
     for head_name, signal_field in regression_head_to_signal_field.items():
         target_column = _head_target_column(head_name)
@@ -254,7 +263,7 @@ def _score_walk_forward_window(
             }
         )
 
-    for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in classification_head_to_signal_field.items():
         target_column = _head_target_column(head_name)
         calibration_scale_pos_weight = _compute_scale_pos_weight(classifier_train_df[target_column])
         calibration_classifier = build_xgb_classifier(
@@ -262,7 +271,20 @@ def _score_walk_forward_window(
             scale_pos_weight=calibration_scale_pos_weight,
         )
         calibration_classifier.fit(X_classifier_train, classifier_train_df[target_column])
-        validation_probabilities = calibration_classifier.predict_proba(X_classifier_validation)[:, 1]
+        selected_feature_columns, feature_selection_summary = _select_head_feature_columns(
+            head_name=head_name,
+            feature_columns=feature_columns,
+            fitted_model=calibration_classifier,
+        )
+        X_classifier_train_selected = classifier_train_df[selected_feature_columns]
+        X_classifier_validation_selected = classifier_validation_df[selected_feature_columns]
+        if feature_selection_summary["enabled"]:
+            calibration_classifier = build_xgb_classifier(
+                config,
+                scale_pos_weight=calibration_scale_pos_weight,
+            )
+            calibration_classifier.fit(X_classifier_train_selected, classifier_train_df[target_column])
+        validation_probabilities = calibration_classifier.predict_proba(X_classifier_validation_selected)[:, 1]
         threshold_calibration = _select_decision_threshold(
             head_name=head_name,
             y_true=classifier_validation_df[target_column],
@@ -272,8 +294,10 @@ def _score_walk_forward_window(
 
         scale_pos_weight = _compute_scale_pos_weight(train_df[target_column])
         classifier = build_xgb_classifier(config, scale_pos_weight=scale_pos_weight)
-        classifier.fit(X_train, train_df[target_column])
-        probabilities = classifier.predict_proba(X_test)[:, 1]
+        X_train_selected = train_df[selected_feature_columns]
+        X_test_selected = test_df[selected_feature_columns]
+        classifier.fit(X_train_selected, train_df[target_column])
+        probabilities = classifier.predict_proba(X_test_selected)[:, 1]
         predictions_df[signal_field] = probabilities
 
         default_metrics = _evaluate_classification(
@@ -303,6 +327,8 @@ def _score_walk_forward_window(
                 "recommended_threshold": recommended_threshold,
                 "calibration_scale_pos_weight": float(calibration_scale_pos_weight),
                 "scale_pos_weight": float(scale_pos_weight),
+                "feature_selection_enabled": bool(feature_selection_summary["enabled"]),
+                "selected_feature_count": int(feature_selection_summary["selected_feature_count"]),
                 **{f"default_{key}": value for key, value in default_metrics.items()},
                 **{f"recommended_{key}": value for key, value in recommended_metrics.items()},
             }
@@ -313,7 +339,7 @@ def _score_walk_forward_window(
         predictions_df[f"{signal_field}_on"] = predictions_df[signal_field] >= threshold
 
     runtime_controls_records = []
-    prediction_fields = list(REGRESSION_HEAD_TO_SIGNAL_FIELD.values()) + list(CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.values())
+    prediction_fields = list(regression_head_to_signal_field.values()) + list(classification_head_to_signal_field.values())
     for row_index in range(len(predictions_df)):
         row_predictions = {
             signal_field: float(predictions_df.iloc[row_index][signal_field])
@@ -346,6 +372,7 @@ def _build_prediction_output_columns(test_df: pd.DataFrame) -> list[str]:
         "target_grid_pnl_t1",
         "target_positive_grid_day_t1",
         "target_tradable_score_t1",
+        "target_clean_execution_day_t1",
         "target_trend_break_risk_t1",
         "target_hostile_selloff_risk_t1",
         "target_vwap_reversion_t1",
@@ -367,6 +394,7 @@ def _head_target_column(head_name: str) -> str:
         "grid_pnl_regression": "target_grid_pnl_t1",
         "positive_grid_day_classifier": "target_positive_grid_day_t1",
         "tradable_classifier": "target_tradable_score_t1",
+        "clean_execution_day_classifier": "target_clean_execution_day_t1",
         "trend_break_risk_classifier": "target_trend_break_risk_t1",
         "hostile_selloff_risk_classifier": "target_hostile_selloff_risk_t1",
         "vwap_reversion_classifier": "target_vwap_reversion_t1",
@@ -375,10 +403,18 @@ def _head_target_column(head_name: str) -> str:
 
 
 def _available_regression_head_mapping(train_df: pd.DataFrame) -> dict[str, str]:
-    mapping = dict(REGRESSION_HEAD_TO_SIGNAL_FIELD)
-    if "target_downside_from_open_t1" in train_df.columns:
-        mapping.update(RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD)
-    return mapping
+    available_mapping: dict[str, str] = {}
+    head_target_mapping = {
+        "upside_regression": "target_upside_t1",
+        "downside_regression": "target_downside_t1",
+        "downside_from_open_regression": "target_downside_from_open_t1",
+        "grid_pnl_regression": "target_grid_pnl_t1",
+    }
+    for head_name, signal_field in REGRESSION_HEAD_TO_SIGNAL_FIELD.items():
+        target_column = head_target_mapping.get(head_name)
+        if target_column and target_column in train_df.columns:
+            available_mapping[head_name] = signal_field
+    return available_mapping
 
 
 def build_parser() -> argparse.ArgumentParser:

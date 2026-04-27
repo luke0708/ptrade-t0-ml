@@ -32,6 +32,15 @@ RESEARCH_REGRESSION_HEAD_TO_SIGNAL_FIELD = {
     "downside_from_open_regression": "pred_downside_from_open_t1",
 }
 
+
+def _available_classification_head_mapping(metadata: dict[str, object]) -> dict[str, str]:
+    available_heads = metadata.get("heads", {})
+    return {
+        head_name: signal_field
+        for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items()
+        if head_name in available_heads
+    }
+
 DOWNSIDE_CONTEXT_COLUMNS = [
     "next_day_gap_return_t1",
     "target_downside_from_open_t1",
@@ -136,6 +145,17 @@ def build_controller_interaction_summary(predictions_df: pd.DataFrame) -> pd.Dat
         "vwap_on_hs_on": vwap_on & hostile_high,
         "vwap_on_hs_off": vwap_on & ~hostile_high,
     }
+    if (
+        "pred_clean_execution_day_t1" in predictions_df.columns
+        and "pred_clean_execution_day_t1_threshold" in predictions_df.columns
+    ):
+        clean_on = predictions_df["pred_clean_execution_day_t1"] >= predictions_df["pred_clean_execution_day_t1_threshold"]
+        segment_masks.update(
+            {
+                "clean_on_hs_off": clean_on & ~hostile_high,
+                "clean_on_hs_on": clean_on & hostile_high,
+            }
+        )
 
     rows: list[dict[str, object]] = []
     for segment_name, mask in segment_masks.items():
@@ -327,7 +347,6 @@ def _score_test_dataset(
     bucket_count: int,
 ) -> pd.DataFrame:
     feature_columns = metadata["feature_columns"]
-    X_test = test_df[feature_columns]
 
     output_columns = [
         "date",
@@ -337,6 +356,7 @@ def _score_test_dataset(
         "target_grid_pnl_t1",
         "target_positive_grid_day_t1",
         "target_tradable_score_t1",
+        "target_clean_execution_day_t1",
         "target_trend_break_risk_t1",
         "target_hostile_selloff_risk_t1",
         "target_vwap_reversion_t1",
@@ -349,31 +369,36 @@ def _score_test_dataset(
     )
     predictions_df = test_df[output_columns].copy().reset_index(drop=True)
     regression_head_to_signal_field = _available_regression_head_mapping(metadata)
+    classification_head_to_signal_field = _available_classification_head_mapping(metadata)
     head_to_signal_field = {
         **regression_head_to_signal_field,
-        **CLASSIFICATION_HEAD_TO_SIGNAL_FIELD,
+        **classification_head_to_signal_field,
     }
 
     for head_name, signal_field in regression_head_to_signal_field.items():
+        head_feature_columns = metadata["heads"][head_name].get("feature_columns", feature_columns)
+        X_test = test_df[head_feature_columns]
         model = build_xgb_regressor(config)
         model.load_model(metadata["heads"][head_name]["model_path"])
         predictions_df[signal_field] = model.predict(X_test)
 
-    for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items():
+    for head_name, signal_field in classification_head_to_signal_field.items():
+        head_feature_columns = metadata["heads"][head_name].get("feature_columns", feature_columns)
+        X_test = test_df[head_feature_columns]
         model = build_xgb_classifier(config, scale_pos_weight=1.0)
         model.load_model(metadata["heads"][head_name]["model_path"])
         predictions_df[signal_field] = model.predict_proba(X_test)[:, 1]
 
     thresholds = {
         signal_field: float(metadata["heads"][head_name]["recommended_threshold"])
-        for head_name, signal_field in CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.items()
+        for head_name, signal_field in classification_head_to_signal_field.items()
     }
     for signal_field, threshold in thresholds.items():
         predictions_df[f"{signal_field}_threshold"] = threshold
         predictions_df[f"{signal_field}_on"] = predictions_df[signal_field] >= threshold
 
     runtime_controls_records = []
-    prediction_fields = list(REGRESSION_HEAD_TO_SIGNAL_FIELD.values()) + list(CLASSIFICATION_HEAD_TO_SIGNAL_FIELD.values())
+    prediction_fields = list(regression_head_to_signal_field.values()) + list(classification_head_to_signal_field.values())
     for row_index in range(len(predictions_df)):
         row_predictions = {
             signal_field: float(predictions_df.iloc[row_index][signal_field])
@@ -443,6 +468,7 @@ def _build_head_bucket_summary(
                     "downside_mean": float(subset["target_downside_t1"].mean()),
                     "positive_grid_day_rate": float(subset["target_positive_grid_day_t1"].mean()),
                     "tradable_rate": float(subset["target_tradable_score_t1"].mean()),
+                    "clean_execution_day_rate": float(subset["target_clean_execution_day_t1"].mean()),
                     "trend_break_risk_rate": float(subset["target_trend_break_risk_t1"].mean()),
                     "hostile_selloff_risk_rate": float(subset["target_hostile_selloff_risk_t1"].mean()),
                     "vwap_reversion_rate": float(subset["target_vwap_reversion_t1"].mean()),
@@ -523,6 +549,7 @@ def _summarize_mode_segment(
             "p10_grid_pnl": 0.0,
             "positive_grid_day_rate": 0.0,
             "tradable_rate": 0.0,
+            "clean_execution_day_rate": 0.0,
             "trend_break_risk_rate": 0.0,
             "hostile_selloff_risk_rate": 0.0,
             "vwap_reversion_rate": 0.0,
@@ -544,6 +571,11 @@ def _summarize_mode_segment(
         "p10_grid_pnl": float(subset["target_grid_pnl_t1"].quantile(0.10)),
         "positive_grid_day_rate": float(subset["target_positive_grid_day_t1"].mean()),
         "tradable_rate": float(subset["target_tradable_score_t1"].mean()),
+        "clean_execution_day_rate": (
+            float(subset["target_clean_execution_day_t1"].mean())
+            if "target_clean_execution_day_t1" in subset.columns
+            else 0.0
+        ),
         "trend_break_risk_rate": float(subset["target_trend_break_risk_t1"].mean()),
         "hostile_selloff_risk_rate": float(subset["target_hostile_selloff_risk_t1"].mean()),
         "vwap_reversion_rate": float(subset["target_vwap_reversion_t1"].mean()),

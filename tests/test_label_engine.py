@@ -124,12 +124,22 @@ class LabelEngineTests(unittest.TestCase):
         self.assertIn("target_vwap_reversion_t1", labels_df.columns)
         self.assertIn("target_trend_break_risk_t1", labels_df.columns)
         self.assertIn("target_hostile_selloff_risk_t1", labels_df.columns)
+        self.assertIn("target_clean_execution_day_t1", labels_df.columns)
         self.assertIn("target_downside_from_open_t1", labels_df.columns)
         self.assertIn("target_downside_from_max_anchor_t1", labels_df.columns)
         self.assertIn("next_day_gap_return_t1", labels_df.columns)
         self.assertEqual(int(labels_df.iloc[0]["target_downside_positive_flag_t1"]), 0)
         self.assertEqual(int(labels_df.iloc[0]["next_day_suspicious_abnormal_jump_flag_t1"]), 0)
         self.assertEqual(int(labels_df.iloc[0]["target_hostile_selloff_risk_t1"]), 0)
+        self.assertEqual(
+            int(labels_df.iloc[0]["target_clean_execution_day_t1"]),
+            int(
+                labels_df.iloc[0]["target_positive_grid_day_t1"] == 1
+                and labels_df.iloc[0]["target_tradable_score_t1"] == 1
+                and float(labels_df.iloc[0]["target_downside_from_open_t1"]) >= -0.025
+                and labels_df.iloc[0]["target_hostile_selloff_risk_t1"] == 0
+            ),
+        )
 
     def test_build_label_targets_audits_abnormal_gap_day(self) -> None:
         canonical_df = pd.DataFrame(

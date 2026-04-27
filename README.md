@@ -20,6 +20,20 @@ PTrade 是封闭沙盒，因此当前主线明确不在盘中运行 XGBoost/Ligh
 
 ## 当前固定口径
 
+### 当前稳定节点
+
+截至 `2026-04-24`，当前可挂 production 节点为：
+
+- 训练时间：`2026-04-23T13:43:11`
+- `model_version`：`baseline_multihead_20260423_134311`
+- `positive_grid_day_classifier`：保留前 `64` 个高增益特征
+- `tradable_classifier`：保留前 `96` 个高增益特征
+- controller：当前偏保守，`AGGRESSIVE` 暂不输出，强信号统一落到 `NORMAL`
+- walk-forward：`NORMAL` 共 `51` 天，`grid_pnl_mean = 0.004650`，失败 / 胜利窗口为 `3 / 19`
+- 最新每日信号：`2026-04-24` 收盘特征导出 `2026-04-27` 使用，当前为 `SAFE`
+
+这版可以作为当前“稳定可挂”版本；主要代价是开仓频率低。后续优化应先在 `baseline_candidate/` 里验证，再 promote 到 production。
+
 ### 运行目录
 
 - `data/`
@@ -102,6 +116,10 @@ python export_ml_daily_signal.py
 - `python daily_backfill_data_mac.py`
   - 每天补齐原始数据
   - `300661_SZ_1m_ptrade.csv` 是硬依赖，没补到最新交易日就应该停止后续流程
+  - 当前统一使用完整交易日 cutoff `15:10`
+  - `15:10` 前只保留上一个完整交易日的数据，不把当天盘中的不完整分钟线 / 日线快照拼进主文件
+  - `15:10` 后才允许把当日数据视为“应完成”的完整交易日
+  - 最新交易日分钟线如果只缺少极少数尾盘 bar，目前容忍 `<= 2` 根，脚本会给出 warning 但不阻断；超过阈值才失败
   - `399006.csv`、`512480.csv` 是软依赖；如果少一天，脚本会警告，但不会因为这两份数据直接失败
 - `python build_minute_foundation.py`
   - 基于最新分钟数据重建 canonical / summary
@@ -110,6 +128,8 @@ python export_ml_daily_signal.py
 - `python export_ml_daily_signal.py`
   - 使用当前 production 模型做日频推理
   - 生成 `t+1` 交易日信号和 dated PTrade 文件
+  - `15:10` 前只能基于前一完整交易日做推理；例如上午运行时，只能导出“今天要用”的策略
+  - `15:10` 后如果要导出“明天要用”的策略，就必须拿到当天完整数据
   - 如果 `300661 1m` 或 `feature_table` 过期，会直接失败
   - 如果 `399006` / `512480` 过期，会允许继续，但会把导出结果强制降级到 `SAFE`
 
@@ -179,21 +199,25 @@ python analyze_walk_forward_failures.py
 
 ### 每周末：确认接受新模型时
 
-只有当你确认 candidate 通过评估时，才执行下面两步：
+只有当你确认 candidate 通过评估时，才执行下面三步：
 
 ```bash
 cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 source .venv/bin/activate
+cp -R models/baseline_stock_only models/baseline_stock_only_backup_$(date +%Y%m%d_%H%M%S)
 python promote_baseline_candidate.py
 python export_ml_daily_signal.py
 ```
 
-两步含义：
+三步含义：
 
+- `cp -R models/baseline_stock_only ...backup...`
+  - promote 前备份当前 production，避免接受新模型后无法快速回滚
 - `python promote_baseline_candidate.py`
   - 把当前 candidate 提升成 production
 - `python export_ml_daily_signal.py`
   - 用新的 production 模型重新导出下一交易日信号和 PTrade 文件
+  - promote 后必须重跑，否则已有 `ml_daily_signal.json` 和 dated PTrade 文件可能仍是旧 production 的结果
 
 ### 什么时候不要重训
 
@@ -220,6 +244,13 @@ python export_ml_daily_signal.py
    - 特征升级
    - controller 升级
 4. 你愿意让新的 candidate 覆盖当前 production
+
+当前节点的下一步计划：
+
+1. 继续提高 `positive_grid_day_classifier` / `tradable_classifier` 质量，而不是继续小幅放松 controller 阈值
+2. 针对 `NORMAL` 低频问题，研究更明确的“可开仓机会”标签或分层控制器
+3. 引入更贴近 `300661` 高开低走特征的隔夜 / 早盘失败 regime 分析
+4. 保持 production 稳定，所有实验先写入 candidate 并通过 walk-forward 检查
 
 ## 最低环境验收
 

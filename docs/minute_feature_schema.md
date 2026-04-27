@@ -9,13 +9,22 @@ The modeling unit is one row per trading day `t`. All minute features must be co
 ## Core Inputs
 
 - Primary minute source: `data/300661_SZ_1m_ptrade.csv`
-- Primary daily source: `data/300661.csv`
+- Primary stock daily source: minute-derived daily summary from `data/300661_SZ_1m_ptrade.csv`
 - Environment daily sources:
   - `data/399006.csv`
   - `data/512480.csv`
+- Overnight context sources:
+  - `data/soxx_daily.csv`
+  - `data/nasdaq_daily.csv`
 - Optional environment minute sources:
   - `data/399006_5m.csv`
   - `data/512480_5m.csv`
+
+Current production note:
+
+- as of `2026-04-24`, the feature table has `455` columns
+- `data/300661.csv` is not the production stock truth source
+- `data/overnight_factors.csv` is rebuilt from local SOX / Nasdaq sources when available
 
 ## Feature Groups
 

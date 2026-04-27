@@ -24,7 +24,12 @@ class _FakeRegressor:
 
 
 class _FakeClassifier:
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "_FakeClassifier":
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        sample_weight: np.ndarray | None = None,
+    ) -> "_FakeClassifier":
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -75,6 +80,7 @@ class WalkForwardAnalysisTests(unittest.TestCase):
                     "target_grid_pnl_t1": [-0.01, 0.0, 0.01, -0.02, 0.015, 0.005, -0.01, 0.01, -0.005, 0.0, 0.01, 0.02],
                     "target_positive_grid_day_t1": [0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1],
                     "target_tradable_score_t1": [0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1],
+                    "target_clean_execution_day_t1": [0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1],
                     "target_trend_break_risk_t1": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
                     "target_hostile_selloff_risk_t1": [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
                     "target_vwap_reversion_t1": [0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1],
@@ -115,7 +121,7 @@ class WalkForwardAnalysisTests(unittest.TestCase):
             self.assertEqual(int(predictions_df["window_id"].nunique()), 3)
             self.assertIn("recommended_mode", predictions_df.columns)
             self.assertIn("signal_rationale", predictions_df.columns)
-            self.assertEqual(len(head_metrics_df), 24)
+            self.assertEqual(len(head_metrics_df), 27)
             self.assertEqual(int(window_mode_df["window_id"].nunique()), 3)
             self.assertIn("ALL", set(mode_summary_df["segment_name"]))
             self.assertIn("pg_tr_on_hs_off", set(controller_summary_df["segment_name"]))

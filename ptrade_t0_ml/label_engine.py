@@ -633,6 +633,26 @@ def _compute_hostile_selloff_risk_label(
     }
 
 
+def _compute_clean_execution_day_label(
+    *,
+    target_positive_grid_day_t1: int,
+    target_tradable_score_t1: int,
+    target_downside_from_open_t1: float,
+    target_vwap_reversion_t1: int,
+    target_trend_break_risk_t1: int,
+    target_hostile_selloff_risk_t1: int,
+) -> dict[str, int]:
+    clean_execution_target = bool(
+        target_positive_grid_day_t1 == 1
+        and target_tradable_score_t1 == 1
+        and target_downside_from_open_t1 >= -0.025
+        and target_hostile_selloff_risk_t1 == 0
+    )
+    return {
+        "target_clean_execution_day_t1": int(clean_execution_target),
+    }
+
+
 def replay_next_day_grid(
     next_day_bars: pd.DataFrame,
     anchor_close: float,
@@ -787,6 +807,14 @@ def build_label_targets(
             next_day_high=float(next_day_row["high"]),
             next_day_low=float(next_day_row["low"]),
         )
+        clean_execution_label = _compute_clean_execution_day_label(
+            target_positive_grid_day_t1=positive_grid_day,
+            target_tradable_score_t1=tradable_score,
+            target_downside_from_open_t1=float(price_target_bundle["target_downside_from_open_t1"]),
+            target_vwap_reversion_t1=int(vwap_reversion_label["target_vwap_reversion_t1"]),
+            target_trend_break_risk_t1=int(trend_break_risk_label["target_trend_break_risk_t1"]),
+            target_hostile_selloff_risk_t1=int(hostile_selloff_label["target_hostile_selloff_risk_t1"]),
+        )
         target_anomaly_flags = _build_target_anomaly_flags(price_target_bundle)
 
         rows.append(
@@ -814,6 +842,7 @@ def build_label_targets(
                 **vwap_reversion_label,
                 **trend_break_risk_label,
                 **hostile_selloff_label,
+                **clean_execution_label,
                 "replay_grid_pnl_cash_t1": replay_result.replay_grid_pnl_cash_t1,
                 "replay_round_trips_t1": replay_result.replay_round_trips_t1,
                 "replay_long_entries_t1": replay_result.replay_long_entries_t1,
@@ -850,6 +879,7 @@ def build_label_targets(
         "vwap_reversion_positive_ratio": float(labels_df["target_vwap_reversion_t1"].mean()),
         "trend_break_risk_positive_ratio": float(labels_df["target_trend_break_risk_t1"].mean()),
         "hostile_selloff_risk_positive_ratio": float(labels_df["target_hostile_selloff_risk_t1"].mean()),
+        "clean_execution_day_positive_ratio": float(labels_df["target_clean_execution_day_t1"].mean()),
         "target_grid_pnl_t1_summary": grid_stats,
         "target_upside_t1_summary": upside_stats,
         "target_downside_t1_summary": downside_stats,
@@ -903,8 +933,9 @@ def run_label_engine(config: ProjectConfig = DEFAULT_CONFIG) -> LabelEngineResul
         result.audit_payload["target_grid_pnl_t1_summary"]["90%"],
     )
     LOGGER.info(
-        "Hostile selloff ratio: %.4f | extreme ratio: %.4f",
+        "Hostile selloff ratio: %.4f | clean execution ratio: %.4f | extreme ratio: %.4f",
         result.audit_payload["hostile_selloff_risk_positive_ratio"],
+        result.audit_payload["clean_execution_day_positive_ratio"],
         result.audit_payload["hostile_selloff_extreme_positive_ratio"],
     )
     LOGGER.info(

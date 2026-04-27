@@ -1,450 +1,206 @@
-# 双机协作开发指南：Windows + Mac Mini M4
+# 双机协作开发指南：Windows + Mac
 
-> 本文档说明如何在 **Windows（主力开发机）** 和 **Mac Mini M4** 之间，通过 **GitHub（代码同步）+ OneDrive（归档同步）** 实现无缝协作开发，并保持每日数据自动补齐。
+本文档说明如何在多台机器之间接手 `ptrade-t0-ml`。当前固定原则是：代码用 Git 同步，运行数据放本机本地 `data/`，OneDrive 只做备份 / 归档，不作为每日训练或推理的运行依赖。
 
----
+## 一、当前协作架构
 
-## 一、整体架构
+| 内容 | 当前做法 |
+| --- | --- |
+| Python 源码 | Git / GitHub |
+| `docs/`、`tests/` | Git / GitHub |
+| `README.md`、`Project Plan.md` | Git / GitHub |
+| `data/` | 每台机器本地运行目录 |
+| `models/` | 本地为准，必要时手工归档 |
+| OneDrive | 只做备份 / 跨机复制 |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        协作架构                              │
-├──────────────────────┬──────────────────────────────────────┤
-│  同步内容             │  同步方式                            │
-├──────────────────────┼──────────────────────────────────────┤
-│  Python 源码          │  Git + GitHub                        │
-│  docs/、tests/        │  Git + GitHub                        │
-│  requirements.txt     │  Git + GitHub                        │
-├──────────────────────┼──────────────────────────────────────┤
-│  data/ 本地运行数据   │  本机本地目录                        │
-│  models/ 模型权重     │  OneDrive（网盘自动同步）            │
-│  plots/ 图表产物      │  OneDrive（网盘自动同步）            │
-└──────────────────────┴──────────────────────────────────────┘
-```
+关键约束：
 
-**核心原则**：
-- 代码（轻量）→ GitHub 同步，支持版本控制和回溯
-- 运行数据先写本地 `data/`，保证每日生产不依赖网盘同步状态
-- OneDrive 只负责归档 / 跨机复制，避免污染 Git 历史
-- `300661` 的 `1m` 是硬依赖；`399006 / 512480` 日线是软依赖，缺失时信号会降级到 `SAFE`
+- `data/` 不应该依赖 OneDrive 软链接
+- 每台机器都可以独立补数
+- `300661_SZ_1m_ptrade.csv` 是每日推理硬依赖
+- `399006.csv` / `512480.csv` 是软依赖，过期时允许导出但强制降级 `SAFE`
+- 生产推理只读 `models/baseline_stock_only/`
+- 研究训练只写 `models/baseline_candidate/`
 
-### 环境模式约定
+## 二、推荐目录
 
-为了避免“读完文档但仍然不能接手开发”，这里明确区分：
-
-- `requirements.txt`
-  - 最小运行依赖
-  - 适用于补数、轻量数据处理
-- `requirements-dev.txt`
-  - 完整算法开发依赖
-  - 适用于特征工程、模型训练、单元测试
-
-凡是要接手机器学习开发，都应以 `requirements-dev.txt` 为准，而不是只安装 `requirements.txt`。
-
----
-
-## 二、目录与路径约定
-
-| 项目   | Windows 路径                                  | Mac 路径                                           |
-|--------|-----------------------------------------------|----------------------------------------------------|
-| 代码仓库 | `e:\AI炒股\机器学习\`                          | `~/Developer/ptrade-t0-ml/`（可自定义）            |
-| 本地运行数据 | `e:\AI炒股\机器学习\data\` | `~/Developer/ptrade-t0-ml/data/` |
-| OneDrive 归档目录 | `D:\onedrive\Development\data_bundle\ptrade-t0-ml\` | `~/Library/CloudStorage/OneDrive-*/Development/data_bundle/ptrade-t0-ml/` |
-
----
-
-## 三、首次配置（二选其一，按电脑操作）
-
-### 3.1 Windows 端配置
-
-> 前提：已安装 Python 3.11、Git，OneDrive 已登录并同步
-
-**Step 1**：以管理员身份打开 PowerShell
-
-```powershell
-# 进入项目目录
-cd "e:\AI炒股\机器学习"
-
-# 运行 data 软链接配置脚本（会自动迁移 data/ 到 OneDrive 并创建软链接）
-.\setup_data_link.ps1
-```
-
-运行后 `data/` 会变成指向 OneDrive 的 Junction 软链接，所有代码中的 `data/xxx.csv` 路径写法保持不变。
-
-**Step 2**：创建虚拟环境（如果还未创建）
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
----
-
-### 3.2 Mac Mini M4 端配置
-
-> 前提：已安装 Python 3.11+、Git，OneDrive 已登录并完成初次同步
-
-如果这台 Mac 需要训练 `xgboost` baseline，请先安装 OpenMP 运行库：
+Mac 当前推荐路径：
 
 ```bash
-brew install libomp
+/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 ```
 
-**Step 1**：克隆代码仓库
+Windows 可使用自己的本地路径，例如：
+
+```powershell
+E:\AI炒股\机器学习\ptrade-t0-ml
+```
+
+不要把仓库的 `data/` 目录直接软链接到 OneDrive。如果要归档，使用单独的归档目录或手工复制。
+
+## 三、Mac 首次接手
 
 ```bash
+cd /Users/wangluke/Localprojects/机器学习
 git clone https://github.com/luke0708/ptrade-t0-ml.git
 cd ptrade-t0-ml
-```
-
-**Step 2**：安装依赖
-
-优先使用虚拟环境：
-
-```bash
 bash setup_venv_mac.sh
 source .venv/bin/activate
-python -V
 python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
+python -m unittest discover -s tests
 ```
 
-这台 Mac 当前已验证的解释器是 `python3.12`。`setup_venv_mac.sh` 会自动选择 `python3.12` 或 `python3.11` 创建 `.venv`。如果仓库里已有完整的 `vendor/` 依赖，它会自动接入虚拟环境；否则请在激活 `.venv` 后执行：
-
-如果这里在 `xgboost` 导入时报 `libomp.dylib` 缺失，说明 Python 包已经装了，但系统缺少 OpenMP 运行库。先执行：
+如果 `xgboost` 报 `libomp.dylib` 缺失：
 
 ```bash
 brew install libomp
 ```
 
-```bash
-pip install -r requirements-dev.txt
-```
-
-如果你明确要手动创建，也请使用实际存在的解释器，例如：
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements-dev.txt
-```
-
-如果这台 Mac 对隐藏目录 `.venv/` 有权限限制，可以改用本地 `vendor/` 模式：
-
-```bash
-bash setup_vendor_env_mac.sh
-source activate_vendor_env.sh
-python3.12 -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta; print('vendor ok')"
-```
-
-> 默认情况下，`setup_vendor_env_mac.sh` 会安装 `requirements-dev.txt`，也就是完整算法开发依赖。`activate_vendor_env.sh` 会把仓库根目录下的 `vendor/` 加到 `PYTHONPATH`。请确保后续运行脚本时使用与安装 `vendor/` 相同的解释器；当前这台 Mac 已验证的是 `python3.12`，而不是系统自带的 `python3`（通常还是 3.9）。
-
-如果 `xgboost` 报 `libomp.dylib` 缺失，也要先执行：
-
-```bash
-brew install libomp
-```
-
-**Step 3**：可选配置 OneDrive 归档目录
-
-```bash
-export PTRADE_ARCHIVE_DATA_DIR="$HOME/Library/CloudStorage/OneDrive-你的目录/Development/data_bundle/ptrade-t0-ml"
-```
-
-如果你当前仓库里的 `data/` 仍然是旧的 OneDrive 软链接，先迁回本地运行目录：
+如果旧环境里的 `data/` 仍是 OneDrive 软链接，先迁回本地目录：
 
 ```bash
 bash migrate_data_dir_to_local.sh
 ```
 
-**Step 4**：验证本地运行目录是否生效
+确认：
 
 ```bash
 ls -la data/
-# 应看到 data/ 是本地目录，而不是 OneDrive 软链接
 ```
 
----
+应看到 `data/` 是本地目录，而不是指向 OneDrive 的软链接。
 
-## 四、日常开发工作流
+## 四、每日生产流程
 
-### 4.1 每日开盘前：补齐数据（两端各自独立运行）
-
-这是**最高频**的操作，建议收盘后（A 股 15:00 之后）各自独立执行：
-
-**Windows 端**（PowerShell / 终端）：
-
-```powershell
-cd "e:\AI炒股\机器学习"
-.\.venv\Scripts\Activate.ps1
-python daily_backfill_data.py
-```
-
-**Mac 端**（Terminal / zsh）：
+普通交易日收盘后运行：
 
 ```bash
-cd ~/Developer/ptrade-t0-ml
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 source .venv/bin/activate
 python daily_backfill_data_mac.py
-```
-
-如果 Mac 使用的是 `vendor/` 模式，则无需激活环境，直接执行：
-
-```bash
-cd ~/Developer/ptrade-t0-ml
-python3.12 daily_backfill_data_mac.py
-```
-
-如需运行其它依赖脚本，则先执行：
-
-```bash
-cd ~/Developer/ptrade-t0-ml
-source activate_vendor_env.sh
-python3.12 build_minute_foundation.py
-```
-
-> ✅ 两端都可以独立补数据。OneDrive 不再是运行硬依赖，只负责后续归档同步。
-
-#### Windows 的 `daily_backfill_data.py` 做了什么？
-
-| 数据文件 | 更新方式 | 数据源 |
-|----------|----------|--------|
-| `data/512480.csv` | 增量追加日线 | 东方财富（PowerShell 绕 SSL） |
-| `data/399006.csv` | 增量追加日线 | 东方财富（PowerShell 绕 SSL） |
-| `data/300661_SZ_1m_ptrade.csv` | 增量追加 1 分钟线 | AkShare 东方财富 |
-
-**特点**：
-- 自动识别文件末尾时间，只拉取缺失部分，不重复不覆盖
-- 基于 `date` / `datetime` 去重，可以放心重复执行
-- 修复了 EM 接口返回 `open=0.0` 的已知 bug
-- 正常情况下每次运行几秒钟内完成
-
-#### Mac 的 `daily_backfill_data_mac.py` 做了什么？
-
-| 数据文件 | 更新方式 | 数据源 |
-|----------|----------|--------|
-| `data/512480.csv` | 增量追加日线 | AkShare |
-| `data/399006.csv` | 增量追加日线 | AkShare |
-| `data/300661_SZ_1m_ptrade.csv` | 增量追加 1 分钟线 | AkShare 东方财富 |
-
-**特点**：
-- 不依赖 Windows PowerShell，可直接在 macOS 上运行
-- 日线与分钟线都按主键去重，重复执行安全
-- 保留 `open=0.0` 修复和 `price` 字段补齐逻辑
-
----
-
-### 4.2 代码同步工作流
-
-#### Windows 端推送代码
-
-```powershell
-cd "e:\AI炒股\机器学习"
-git add .
-git commit -m "feat: 描述你的改动"
-git push origin main
-```
-
-#### Mac 端拉取代码
-
-```bash
-cd ~/Developer/ptrade-t0-ml
-git pull origin main
-```
-
-#### Mac 端推送代码
-
-```bash
-git add .
-git commit -m "feat: 描述你的改动"
-git push origin main
-```
-
-#### Windows 端拉取 Mac 的代码
-
-```powershell
-git pull origin main
-```
-
----
-
-### 4.3 推荐的日常开发顺序
-
-```
-
-### 4.4 接手算法开发的最低验收标准
-
-以下两步都通过，才算“这台机器已经可接手开发”：
-
-```bash
-python -c "import pandas, akshare, numpy, sklearn, matplotlib, xgboost, pandas_ta"
-python -m unittest discover -s tests
-```
-每天开始工作时：
-  1. git pull                   ← 先拉最新代码
-  2. Windows 跑 python daily_backfill_data.py，或 Mac 跑 python3.12 daily_backfill_data_mac.py
-  3. 开发写代码 / 训练模型 ...
-
-收工时：
-  4. git add . && git commit && git push  ← 推送代码到 GitHub
-  5. 如需归档，再手动执行 python sync_runtime_data_to_archive.py
-```
-
----
-
-## 五、重建生产流水线（新机器首次运行）
-
-当 OneDrive 数据同步完成后，如需重新生成所有中间产物（`foundation/` 目录），按以下顺序运行：
-
-```bash
-# Phase 1：规范化并审计主分钟数据底座
 python build_minute_foundation.py
-
-# Phase 2：生成首批生产标签
-python build_label_engine.py
-
-# Phase 3：生成首批生产特征表
 python build_feature_engine.py
-
-# Phase 4：训练 baseline 7 头模型（含阈值校准）
-python train_baseline_models.py
-
-# Phase 5：导出当日 ML 信号
 python export_ml_daily_signal.py
 ```
 
-> ❗ 以上每步有依赖关系，必须按顺序执行。仅当 `data/300661_SZ_1m_ptrade.csv` 已就位（通过 OneDrive 同步）时才能正常运行。
+产物：
 
----
+- `data/ml_daily_signal.json`
+- `data/ml_daily_signal.csv`
+- `generated/ptrade/ptrade_300661_latest.py`
+- `generated/ptrade/ptrade_300661_YYYYMMDD.py`
 
-## 六、OneDrive 数据目录说明
+使用时优先复制 dated 文件到 PTrade。`YYYYMMDD` 是 `signal_for_date`，表示下一次真正运行策略的交易日。
 
-通过软链接方案，`data/` 在 Git 层面不再跟踪任何内容，实际数据存储在 OneDrive：
+## 五、周末研究流程
 
-```
-D:\onedrive\Development\data_bundle\ptrade-t0-ml\   （Windows 上的 OneDrive 实体目录）
-├── 300661_SZ_1m_ptrade.csv     ← 主分钟数据：~40MB，516240 行
-├── 300661_features.csv
-├── 300661_labeled_dataset.csv
-├── 300661_regression_dataset.csv
-├── 399006.csv                  ← 创业板指日线
-├── 512480.csv                  ← 半导体 ETF 日线
-├── ml_daily_signal.json        ← 每日 ML 信号
-├── ml_daily_signal.csv
-├── foundation/                 ← Phase 1-3 产物目录
-│   ├── 300661_SZ_1m_canonical.csv
-│   ├── 300661_SZ_1m_daily_summary.csv
-│   ├── 300661_SZ_label_targets.csv
-│   ├── 300661_SZ_feature_table.csv
-│   └── 300661_SZ_training_dataset.csv
-└── ...
-```
-
-OneDrive 会在两台机器之间**自动后台同步**，无需任何手动操作。
-
----
-
-## 七、不同场景的处理方式
-
-### 场景 A：只在 Windows 开发，Mac 只查看结果
-
-- Windows 负责跑 `daily_backfill_data.py` 更新数据、训练模型、推送代码
-- Mac 只用 `git pull` 拉代码，数据通过 OneDrive 自动同步
-
-### 场景 B：两台电脑都在开发代码
-
-- 遵守"**先 pull 再 push**"原则，避免代码冲突
-- 数据文件通过 OneDrive 同步，无冲突风险（`.gitignore` 已排除）
-
-### 场景 C：Mac 端也需要独立补数据
-
-当前仓库已经提供 `daily_backfill_data_mac.py`，直接执行即可：
+只有在周末或明确做模型升级时运行：
 
 ```bash
-cd ~/Developer/ptrade-t0-ml
-python3.12 daily_backfill_data_mac.py
-```
-
-如果使用 `.venv/`，先执行：
-
-```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 source .venv/bin/activate
-python daily_backfill_data_mac.py
+python build_label_engine.py
+python train_baseline_models.py
+python analyze_baseline_quality.py
+python analyze_walk_forward.py
+python analyze_walk_forward_failures.py
 ```
 
----
+这组命令只训练和评估 candidate，不会直接影响每日 production 推理。
 
-## 八、常见问题
+## 六、接受新模型
 
-### Q1：git push 失败，提示 `Failed to connect to 127.0.0.1 port 10809`
-
-旧的代理配置导致，运行以下命令清除：
-
-```powershell
-# Windows
-git config --global --unset http.proxy
-git config --global --unset https.proxy
-```
+只有 candidate 通过 walk-forward 复盘后，才执行：
 
 ```bash
-# Mac
-git config --global --unset http.proxy
-git config --global --unset https.proxy
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+cp -R models/baseline_stock_only models/baseline_stock_only_backup_$(date +%Y%m%d_%H%M%S)
+python promote_baseline_candidate.py
+python export_ml_daily_signal.py
 ```
 
----
+说明：
 
-### Q2：OneDrive 数据还没同步完，如何查看同步状态？
+- promote 前先备份旧 production
+- `promote_baseline_candidate.py` 是唯一把 candidate 变成 production 的动作
+- promote 后必须重跑 `export_ml_daily_signal.py`
 
-- **Windows**：右键任务栏 OneDrive 图标，查看同步进度
-- **Mac**：点击菜单栏 OneDrive 图标，查看同步状态
+## 七、当前稳定节点
 
-大文件（如 `300661_SZ_1m_ptrade.csv` ~40MB）首次同步可能需要几分钟，请等待完成后再运行流水线脚本。
+截至 `2026-04-24`：
 
----
+- production 训练时间：`2026-04-23T13:43:11`
+- `model_version`：`baseline_multihead_20260423_134311`
+- `positive_grid_day_classifier`：top `64`
+- `tradable_classifier`：top `96`
+- walk-forward：失败 / 胜利窗口 `3 / 19`
+- `NORMAL`：`51` 天，`grid_pnl_mean = 0.004650`
+- 当前 production 可挂，但开仓频率偏低
 
-### Q3：如何确认软链接配置成功？
+下一步研究目标不是替换 PTrade 架构，而是在 candidate 中提高 `positive_grid / tradable` 头部质量，并安全提高 `NORMAL` 覆盖率。
 
-**Windows**：
+## 八、代码同步
 
-```powershell
-(Get-Item "e:\AI炒股\机器学习\data").Attributes
-# 应包含 ReparsePoint
-```
-
-**Mac**：
+开始工作前：
 
 ```bash
-ls -la ~/Developer/ptrade-t0-ml/data
-# 应显示：data -> /Users/xxx/Library/CloudStorage/.../ptrade-t0-ml
+git pull origin main
 ```
 
----
+收工提交：
 
-### Q4：如何添加新的大文件到数据同步？
-
-只需将文件放入 `data/` 目录（实际写入 OneDrive），OneDrive 会自动同步到另一台机器。无需修改 `.gitignore`，因为 `data` 软链接本身和其内容都已被排除。
-
----
-
-## 九、快速参考卡
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    日常操作速查                              │
-├────────────────────────┬────────────────────────────────────┤
-│  操作                  │  命令                               │
-├────────────────────────┼────────────────────────────────────┤
-│  每日补数据（Windows） │  python daily_backfill_data.py      │
-│  每日补数据（Mac）     │  python3.12 daily_backfill_data_mac.py │
-│  拉取最新代码          │  git pull origin main               │
-│  推送代码              │  git add . && git commit && git push│
-│  重建特征标签          │  按第五节顺序运行 5 个脚本         │
-│  导出当日信号          │  python export_ml_daily_signal.py   │
-└────────────────────────┴────────────────────────────────────┘
+```bash
+git status --short
+git add README.md "Project Plan.md" docs ptrade_t0_ml tests
+git commit -m "docs: sync current ml production workflow"
+git push origin main
 ```
 
----
+不要把 `data/`、`analysis/`、`models/` 的大文件默认加入 Git；如需归档，单独复制到 OneDrive 或其它备份目录。
 
-*文档最后更新：2026-04-19 | 维护人：luke0708*
+## 九、常见检查命令
+
+确认 production / candidate 是否一致：
+
+```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+python - <<'PY'
+import json
+from pathlib import Path
+
+base = Path(".")
+for name, rel in [
+    ("candidate", "models/baseline_candidate/baseline_candidate_metadata.json"),
+    ("production", "models/baseline_stock_only/baseline_stock_only_metadata.json"),
+]:
+    data = json.loads((base / rel).read_text())
+    print(name, data.get("trained_at"), data.get("model_slot"))
+    for head in ["positive_grid_day_classifier", "tradable_classifier"]:
+        head_meta = data.get("heads", {}).get(head, {})
+        print(" ", head, len(head_meta.get("feature_columns", [])))
+PY
+```
+
+确认每日信号：
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+signal = json.loads(Path("data/ml_daily_signal.json").read_text())
+for key in [
+    "date",
+    "signal_for_date",
+    "recommended_mode",
+    "signal_rationale",
+    "model_version",
+    "feature_version",
+]:
+    print(key, signal.get(key))
+PY
+```
+
+文档最后更新：`2026-04-24`

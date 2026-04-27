@@ -69,8 +69,13 @@ python export_ml_daily_signal.py
 - 每天补原始数据
 - `data/300661_SZ_1m_ptrade.csv` 是硬依赖
 - 这一步不能攒着不跑，因为 `1m` 数据隔太久会越来越难补
+- 当前完整交易日 cutoff 固定为 `15:10`
+- `15:10` 前只保留上一个完整交易日的数据，不把当天盘中的不完整分钟线 / 日线快照拼进主文件
+- `15:10` 后才要求本地数据推进到当日完整交易日
 - 当前脚本校验逻辑是：
   - `300661 1m` 没补到当前应有交易日，会直接失败
+  - 如果最新交易日只缺极少数尾盘分钟，目前容忍 `<= 2` 根，脚本会 warning 但允许继续
+  - 如果缺失分钟数超过阈值，才会作为 hard failure 阻断
   - `399006` / `512480` 少一天会告警，但不会因为这两份环境数据直接失败
 
 `python build_minute_foundation.py`
@@ -86,6 +91,8 @@ python export_ml_daily_signal.py
 - 使用当前 production 模型做日频推理
 - 生成下一交易日的 `ml_daily_signal.json`
 - 同时生成下一交易日的 PTrade dated 策略脚本
+- `15:10` 前只能基于前一完整交易日做推理
+- `15:10` 后如果要导出下一交易日策略，就必须已经拿到当日完整数据
 - 当前导出阶段校验逻辑是：
   - `300661 1m` 和 `feature_table` 是硬依赖，过期就直接失败
   - `399006` / `512480` 是软依赖，过期时允许继续，但导出会强制降级到 `SAFE`
@@ -176,16 +183,20 @@ python analyze_walk_forward_failures.py
 ```bash
 cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 source .venv/bin/activate
+cp -R models/baseline_stock_only models/baseline_stock_only_backup_$(date +%Y%m%d_%H%M%S)
 python promote_baseline_candidate.py
 python export_ml_daily_signal.py
 ```
 
 说明：
 
+- `cp -R ...backup...`
+  - promote 前先备份当前 production
 - `python promote_baseline_candidate.py`
   - 把 candidate 提升为 production
 - `python export_ml_daily_signal.py`
   - 用新 production 模型导出下一交易日信号和 PTrade 文件
+  - promote 后必须重跑，否则已有 `ml_daily_signal.json` 和 PTrade dated 脚本可能仍是旧 production 的结果
 
 ## 七、什么时候不要重训
 
@@ -218,7 +229,55 @@ python export_ml_daily_signal.py
 6. `python promote_baseline_candidate.py`
    - 才会把 candidate 变成新的 production
 
-## 九、什么时候可以接受新模型
+## 九、当前稳定生产版
+
+截至 `2026-04-24`，当前 production 已经是 `2026-04-23T13:43:11` 训练的稳定版。
+
+当前版本特征选择口径：
+
+- `positive_grid_day_classifier`：只保留前 `64` 个增益特征
+- `tradable_classifier`：只保留前 `96` 个增益特征
+- controller 当前偏保守：`AGGRESSIVE` 暂不输出，强信号统一落到 `NORMAL`
+- 当前目标是先获得“可稳定挂”的版本，不追求高开仓频率
+
+当前 walk-forward 结果口径：
+
+- `NORMAL`：`51` 天，平均 `grid_pnl_mean = 0.004650`
+- `SAFE`：`1334` 天，平均 `grid_pnl_mean = -0.004308`
+- 失败窗口 / 胜利窗口：`3 / 19`
+- 最近测试切片里 `NORMAL`：`19` 天，平均 `grid_pnl_mean = 0.000010`
+
+结论：
+
+- 这版可以作为当前“稳定可挂”版本
+- 主要代价是开仓频率低
+- 如果你要继续提高开仓频率，应先在 candidate 上优化，再通过 walk-forward 验证，不要直接改 production
+
+### 如何确认 production 和 candidate 是否一致
+
+```bash
+cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
+source .venv/bin/activate
+python - <<'PY'
+import json
+from pathlib import Path
+
+base = Path("/Users/wangluke/Localprojects/机器学习/ptrade-t0-ml")
+for name, rel in [
+    ("candidate", "models/baseline_candidate/baseline_candidate_metadata.json"),
+    ("production", "models/baseline_stock_only/baseline_stock_only_metadata.json"),
+]:
+    data = json.loads((base / rel).read_text())
+    print(name, data.get("trained_at"), data.get("model_slot"))
+    for head in ["positive_grid_day_classifier", "tradable_classifier"]:
+        head_meta = data.get("heads", {}).get(head, {})
+        print(" ", head, len(head_meta.get("feature_columns", [])))
+PY
+```
+
+如果两边 `trained_at` 和关键 head 的特征数量一致，说明当前 candidate 已经被 promote 成 production。
+
+## 十、什么时候可以接受新模型
 
 当前阶段，建议至少满足下面条件才接受新模型：
 
@@ -230,7 +289,7 @@ python export_ml_daily_signal.py
    - controller 升级
 4. 你愿意执行 `python promote_baseline_candidate.py`
 
-## 十、最简操作版
+## 十一、最简操作版
 
 ### 每天收盘后
 
@@ -260,6 +319,7 @@ python analyze_walk_forward_failures.py
 ```bash
 cd /Users/wangluke/Localprojects/机器学习/ptrade-t0-ml
 source .venv/bin/activate
+cp -R models/baseline_stock_only models/baseline_stock_only_backup_$(date +%Y%m%d_%H%M%S)
 python promote_baseline_candidate.py
 python export_ml_daily_signal.py
 ```
